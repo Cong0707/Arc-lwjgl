@@ -384,7 +384,7 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     override fun setBorderless(undecorated: Boolean) {
-        TODO("Not yet implemented")
+        return
     }
 
     override fun setResizable(resizable: Boolean) {
@@ -402,7 +402,7 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     override fun getBufferFormat(): BufferFormat {
-        TODO("Not yet implemented")
+        return bufferFormat!!
     }
 
     /** Sets the target framerate for the application, when using continuous rendering. Must be positive. The cpu sleeps as needed.
