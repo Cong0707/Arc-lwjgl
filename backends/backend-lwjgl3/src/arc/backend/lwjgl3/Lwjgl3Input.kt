@@ -15,10 +15,10 @@
  */
 package arc.backend.lwjgl3
 
+import arc.Core
 import arc.Input
 import arc.graphics.gl.HdpiMode
 import arc.input.InputEventQueue
-import arc.input.InputProcessor
 import arc.input.KeyCode
 import arc.struct.IntSet
 import arc.util.Disposable
@@ -27,7 +27,6 @@ import kotlin.math.max
 
 
 class Lwjgl3Input(val window: Lwjgl3Window) : Disposable, Input() {
-    var inputProcessor: InputProcessor? = null
     val eventQueue: InputEventQueue = InputEventQueue()
 
     var mouseX: Int = 0
@@ -36,11 +35,11 @@ class Lwjgl3Input(val window: Lwjgl3Window) : Disposable, Input() {
     var deltaX: Int = 0
     var deltaY: Int = 0
     var justTouched: Boolean = false
-    val justPressedButtons: BooleanArray = BooleanArray(5)
+    val justPressedButtons: BooleanArray = BooleanArray(500)
     var lastCharacter: Char = 0.toChar()
 
-    protected val pressedKeys: BooleanArray = BooleanArray(5)
-    protected val justPressedKeys: BooleanArray = BooleanArray(5)
+    protected val pressedKeys: BooleanArray = BooleanArray(500)
+    protected val justPressedKeys: BooleanArray = BooleanArray(500)
     private val keysToCatch = IntSet()
     protected var pressedKeyCount: Int = 0
     protected var keyJustPressed: Boolean = false
@@ -55,14 +54,14 @@ class Lwjgl3Input(val window: Lwjgl3Window) : Disposable, Input() {
         override fun invoke(window: Long, codepoint: Int) {
             if ((codepoint and 0xff00) == 0xf700) return
             lastCharacter = codepoint.toChar()
-            this@Lwjgl3Input.window.graphics!!.requestRendering()
+            (Core.graphics as Lwjgl3Graphics).requestRendering()
             eventQueue.keyTyped(codepoint.toChar())
         }
     }
 
     private val scrollCallback: GLFWScrollCallback = object : GLFWScrollCallback() {
         override fun invoke(window: Long, scrollX: Double, scrollY: Double) {
-            this@Lwjgl3Input.window.graphics!!.requestRendering()
+            (Core.graphics as Lwjgl3Graphics).requestRendering()
             eventQueue.scrolled(-scrollX.toFloat(), -scrollY.toFloat())
         }
     }
@@ -76,19 +75,19 @@ class Lwjgl3Input(val window: Lwjgl3Window) : Disposable, Input() {
             deltaY = y.toInt() - logicalMouseY
             logicalMouseX = x.toInt()
             this@Lwjgl3Input.mouseX = logicalMouseX
-            logicalMouseY = y.toInt()
+            logicalMouseY = window.graphics!!.height - y.toInt() //y翻转
             this@Lwjgl3Input.mouseY = logicalMouseY
 
-            if (window.getConfig().hdpiMode == HdpiMode.pixels) {
-                val xScale = window.graphics!!.getBackBufferWidth() / window.graphics!!.width.toFloat()
-                val yScale = window.graphics!!.getBackBufferHeight() / window.graphics!!.height.toFloat()
+            if (window.config.hdpiMode == HdpiMode.pixels) {
+                val xScale = window.graphics!!.backBufferWidth.toFloat() / window.graphics!!.width.toFloat()
+                val yScale = window.graphics!!.backBufferHeight.toFloat() / window.graphics!!.height.toFloat()
                 deltaX = (deltaX * xScale).toInt()
                 deltaY = (deltaY * yScale).toInt()
                 this@Lwjgl3Input.mouseX = (this@Lwjgl3Input.mouseX * xScale).toInt()
                 this@Lwjgl3Input.mouseY = (this@Lwjgl3Input.mouseY * yScale).toInt()
             }
 
-            window.graphics!!.requestRendering()
+            (Core.graphics as Lwjgl3Graphics).requestRendering()
             val time = System.nanoTime()
             if (mousePressed > 0) {
                 eventQueue.touchDragged(this@Lwjgl3Input.mouseX, this@Lwjgl3Input.mouseY, 0)
@@ -107,21 +106,21 @@ class Lwjgl3Input(val window: Lwjgl3Window) : Disposable, Input() {
             if (action == GLFW.GLFW_PRESS) {
                 mousePressed++
                 justTouched = true
-                justPressedButtons[gdxButton.ordinal] = true
-                this@Lwjgl3Input.window.graphics!!.requestRendering()
-                eventQueue.touchDown(this@Lwjgl3Input.mouseX, this@Lwjgl3Input.mouseY, 0, gdxButton)
+                justPressedButtons[button] = true
+                (Core.graphics as Lwjgl3Graphics).requestRendering()
+                eventQueue.touchDown(mouseX, mouseY, 0, gdxButton)
             } else {
                 mousePressed = max(0.0, (mousePressed - 1).toDouble()).toInt()
-                this@Lwjgl3Input.window.graphics!!.requestRendering()
-                eventQueue.touchUp(this@Lwjgl3Input.mouseX, this@Lwjgl3Input.mouseY, 0, gdxButton)
+                (Core.graphics as Lwjgl3Graphics).requestRendering()
+                eventQueue.touchUp(mouseX, mouseY, 0, gdxButton)
             }
         }
 
         private fun toGdxButton(button: Int): KeyCode {
-            if (button == 0) return KeyCode.left
-            if (button == 1) return KeyCode.right
+            if (button == 0) return KeyCode.mouseLeft
+            if (button == 1) return KeyCode.mouseRight
             if (button == 2) return KeyCode.mouseMiddle
-            if (button == 3) return KeyCode.back
+            if (button == 3) return KeyCode.mouseBack
             if (button == 4) return KeyCode.mouseForward
             return KeyCode.unknown
         }
@@ -141,7 +140,7 @@ class Lwjgl3Input(val window: Lwjgl3Window) : Disposable, Input() {
                 keyJustPressed = true
                 pressedKeys.set(key, true)
                 justPressedKeys.set(key, true)
-                this@Lwjgl3Input.window.graphics!!.requestRendering()
+                Core.graphics!!.requestRendering()
                 lastCharacter = 0.toChar()
                 val character = characterForKeyCode(keyCode)
                 if (character.code != 0) charCallback.invoke(window, character.code)
@@ -151,12 +150,12 @@ class Lwjgl3Input(val window: Lwjgl3Window) : Disposable, Input() {
                 keyCode = getGdxKeyCode(key)
                 pressedKeyCount--
                 pressedKeys.set(key, false)
-                this@Lwjgl3Input.window.graphics!!.requestRendering()
+                Core.graphics!!.requestRendering()
                 eventQueue.keyUp(keyCode)
             }
 
             GLFW.GLFW_REPEAT -> if (lastCharacter.code != 0) {
-                this@Lwjgl3Input.window.graphics!!.requestRendering()
+                Core.graphics!!.requestRendering()
                 eventQueue.keyTyped(lastCharacter)
             }
         }
@@ -184,8 +183,12 @@ class Lwjgl3Input(val window: Lwjgl3Window) : Disposable, Input() {
     }
 
     fun update() {
-        eventQueue.processor = inputProcessor
+        eventQueue.processor = inputMultiplexer
         eventQueue.drain()
+
+        for (device in devices) {
+            device.preUpdate()
+        }
     }
 
     fun prepareNext() {
@@ -202,6 +205,11 @@ class Lwjgl3Input(val window: Lwjgl3Window) : Disposable, Input() {
                 justPressedKeys.set(i ,false)
             }
         }
+
+        for (device in devices) {
+            device.postUpdate()
+        }
+
         deltaX = 0
         deltaY = 0
     }
@@ -296,9 +304,9 @@ class Lwjgl3Input(val window: Lwjgl3Window) : Disposable, Input() {
     fun setCursorPosition(x: Int, y: Int) {
         var x = x
         var y = y
-        if (window.getConfig().hdpiMode == HdpiMode.pixels) {
-            val xScale = window.graphics!!.width / window.graphics!!.getBackBufferWidth().toFloat()
-            val yScale = window.graphics!!.height / window.graphics!!.getBackBufferHeight().toFloat()
+        if (window.config.hdpiMode == HdpiMode.pixels) {
+            val xScale = Core.graphics!!.width / Core.graphics!!.getBackBufferWidth().toFloat()
+            val yScale = Core.graphics!!.height / Core.graphics!!.getBackBufferHeight().toFloat()
             x = (x * xScale).toInt()
             y = (y * yScale).toInt()
         }
