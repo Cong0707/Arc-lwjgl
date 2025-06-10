@@ -1,23 +1,11 @@
-/*******************************************************************************
- * Copyright 2011 See AUTHORS file.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 package arc.backend.lwjgl3
 
-import Lwjgl3Graphics
+import arc.Application
 import arc.ApplicationListener
 import arc.Core
+import arc.Files
+import arc.backend.lwjgl3.*
+import arc.files.Fi
 import arc.graphics.Pixmap
 import arc.struct.Seq
 import arc.util.Disposable
@@ -26,28 +14,30 @@ import org.lwjgl.BufferUtils
 import org.lwjgl.glfw.*
 import java.nio.IntBuffer
 
-
 class Lwjgl3Window internal constructor(
     /** @return the [ApplicationListener] associated with this window
      */
-    val listener: ApplicationListener,
-    config: Lwjgl3ApplicationConfiguration,
+    val listener: ApplicationListener, private val lifecycleListeners: Seq<ApplicationListener>,
+    val config: Lwjgl3ApplicationConfiguration,
     application: Lwjgl3Application
 ) : Disposable {
     var windowHandle: Long = 0
         private set
-    val application: Lwjgl3Application
+    val application: Lwjgl3Application = application
     var isListenerInitialized: Boolean = false
         private set
-    private var windowListener: Lwjgl3WindowListener? = null
+
+    /** @return the [Lwjgl3WindowListener] set on this window
+     */
+    var windowListener: Lwjgl3WindowListener? = config.windowListener
     var graphics: Lwjgl3Graphics? = null
         private set
-    private var input: Lwjgl3Input? = null
-    private val config: Lwjgl3ApplicationConfiguration
+    var input: Lwjgl3Input? = null
+        private set
     private val runnables = Seq<Runnable>()
     private val executedRunnables = Seq<Runnable>()
-    private val tmpBuffer: IntBuffer
-    private val tmpBuffer2: IntBuffer
+    private val tmpBuffer: IntBuffer = BufferUtils.createIntBuffer(1)
+    private val tmpBuffer2: IntBuffer = BufferUtils.createIntBuffer(1)
 
     /** Whether the window is iconfieid  */
     var isIconified: Boolean = false
@@ -60,12 +50,26 @@ class Lwjgl3Window internal constructor(
             postRunnable {
                 if (focused) {
                     if (config.pauseWhenLostFocus) {
+                        synchronized(lifecycleListeners) {
+                            for (lifecycleListener in lifecycleListeners) {
+                                lifecycleListener.resume()
+                            }
+                        }
                         listener.resume()
                     }
-                    windowListener?.focusGained()
+                    if (windowListener != null) {
+                        windowListener!!.focusGained()
+                    }
                 } else {
-                    windowListener?.focusLost()
+                    if (windowListener != null) {
+                        windowListener!!.focusLost()
+                    }
                     if (config.pauseWhenLostFocus) {
+                        synchronized(lifecycleListeners) {
+                            for (lifecycleListener in lifecycleListeners) {
+                                lifecycleListener.pause()
+                            }
+                        }
                         listener.pause()
                     }
                 }
@@ -77,14 +81,26 @@ class Lwjgl3Window internal constructor(
     private val iconifyCallback: GLFWWindowIconifyCallback = object : GLFWWindowIconifyCallback() {
         override fun invoke(windowHandle: Long, iconified: Boolean) {
             postRunnable {
-                windowListener?.iconified(iconified)
+                if (windowListener != null) {
+                    windowListener!!.iconified(iconified)
+                }
                 this@Lwjgl3Window.isIconified = iconified
                 if (iconified) {
                     if (config.pauseWhenMinimized) {
+                        synchronized(lifecycleListeners) {
+                            for (lifecycleListener in lifecycleListeners) {
+                                lifecycleListener.pause()
+                            }
+                        }
                         listener.pause()
                     }
                 } else {
                     if (config.pauseWhenMinimized) {
+                        synchronized(lifecycleListeners) {
+                            for (lifecycleListener in lifecycleListeners) {
+                                lifecycleListener.resume()
+                            }
+                        }
                         listener.resume()
                     }
                 }
@@ -95,7 +111,9 @@ class Lwjgl3Window internal constructor(
     private val maximizeCallback: GLFWWindowMaximizeCallback = object : GLFWWindowMaximizeCallback() {
         override fun invoke(windowHandle: Long, maximized: Boolean) {
             postRunnable {
-                windowListener?.maximized(maximized)
+                if (windowListener != null) {
+                    windowListener!!.maximized(maximized)
+                }
             }
         }
     }
@@ -119,7 +137,9 @@ class Lwjgl3Window internal constructor(
                 files[i] = getName(names, i)
             }
             postRunnable {
-                windowListener?.filesDropped(files)
+                if (windowListener != null) {
+                    windowListener!!.filesDropped(files)
+                }
             }
         }
     }
@@ -127,17 +147,11 @@ class Lwjgl3Window internal constructor(
     private val refreshCallback: GLFWWindowRefreshCallback = object : GLFWWindowRefreshCallback() {
         override fun invoke(windowHandle: Long) {
             postRunnable {
-                windowListener?.refreshRequested()
+                if (windowListener != null) {
+                    windowListener!!.refreshRequested()
+                }
             }
         }
-    }
-
-    init {
-        this.windowListener = config.windowListener
-        this.config = config
-        this.application = application
-        this.tmpBuffer = BufferUtils.createIntBuffer(1)
-        this.tmpBuffer2 = BufferUtils.createIntBuffer(1)
     }
 
     fun create(windowHandle: Long) {
@@ -152,20 +166,12 @@ class Lwjgl3Window internal constructor(
         GLFW.glfwSetDropCallback(windowHandle, dropCallback)
         GLFW.glfwSetWindowRefreshCallback(windowHandle, refreshCallback)
 
-        windowListener?.created(this)
+        if (windowListener != null) {
+            windowListener!!.created(this)
+        }
     }
 
-    /** @return the [Lwjgl3WindowListener] set on this window
-     */
-    fun getWindowListener(): Lwjgl3WindowListener? {
-        return windowListener
-    }
-
-    fun setWindowListener(listener: Lwjgl3WindowListener?) {
-        this.windowListener = listener
-    }
-
-    /** Post a [Runnable] to this window's event queue. Use this if you access statics like [Gdx.graphics] in your
+    /** Post a [Runnable] to this window's event queue. Use this if you access statics like [Core.graphics] in your
      * runnable instead of [Application.postRunnable].  */
     fun postRunnable(runnable: Runnable?) {
         synchronized(runnables) {
@@ -235,27 +241,21 @@ class Lwjgl3Window internal constructor(
 
     /** Sets the icon that will be used in the window's title bar. Has no effect in macOS, which doesn't use window icons.
      * @param image One or more images. The one closest to the system's desired size will be scaled. Good sizes include 16x16,
-     * 32x32 and 48x48. Pixmap format [RGBA8888][arc.graphics.Pixmap.Format.RGBA8888] is preferred so
+     * 32x32 and 48x48. Pixmap format [RGBA8888][com.badlogic.gdx.graphics.Pixmap.Format.RGBA8888] is preferred so
      * the images will not have to be copied and converted. The chosen image is copied, and the provided Pixmaps are not
      * disposed.
      */
     fun setIcon(vararg image: Pixmap?) {
-        Companion.setIcon(windowHandle, image.toList().toTypedArray())
+        setIcon(*image)
     }
 
-    /** Sets minimum and maximum size limits for the window. If the window is full screen or not resizable, these limits are
-     * ignored. Use -1 to indicate an unrestricted dimension.  */
-    fun setSizeLimits(minWidth: Int, minHeight: Int, maxWidth: Int, maxHeight: Int) {
-        setSizeLimits(windowHandle, minWidth, minHeight, maxWidth, maxHeight)
-    }
-
-    fun getInput(): Lwjgl3Input? {
-        return input
+    fun setTitle(title: CharSequence) {
+        GLFW.glfwSetWindowTitle(windowHandle, title)
     }
 
     fun windowHandleChanged(windowHandle: Long) {
         this.windowHandle = windowHandle
-        input?.windowHandleChanged(windowHandle)
+        input!!.windowHandleChanged(windowHandle)
     }
 
     fun update(): Boolean {
@@ -272,7 +272,7 @@ class Lwjgl3Window internal constructor(
         var shouldRender = executedRunnables.size > 0 || graphics!!.isContinuousRendering
         executedRunnables.clear()
 
-        if (!isIconified) input?.update()
+        if (!isIconified) input!!.update()
 
         synchronized(this) {
             shouldRender = shouldRender or (requestRendering && !isIconified)
@@ -283,7 +283,7 @@ class Lwjgl3Window internal constructor(
         if (asyncResized) {
             asyncResized = false
             graphics!!.updateFramebufferInfo()
-            graphics!!.gl20!!.glViewport(0, 0, graphics!!.backBufferWidth, graphics!!.backBufferHeight)
+            Core.gl20.glViewport(0, 0, graphics!!.backBufferWidth, graphics!!.backBufferHeight)
             listener.resize(graphics!!.width, graphics!!.height)
             graphics!!.update()
             listener.update()
@@ -297,7 +297,7 @@ class Lwjgl3Window internal constructor(
             GLFW.glfwSwapBuffers(windowHandle)
         }
 
-        if (!isIconified) input?.prepareNext()
+        if (!isIconified) input!!.prepareNext()
 
         return shouldRender
     }
@@ -310,10 +310,6 @@ class Lwjgl3Window internal constructor(
 
     fun shouldClose(): Boolean {
         return GLFW.glfwWindowShouldClose(windowHandle)
-    }
-
-    fun getConfig(): Lwjgl3ApplicationConfiguration {
-        return config
     }
 
     fun initializeListener() {
@@ -339,7 +335,7 @@ class Lwjgl3Window internal constructor(
         listener.dispose()
         Lwjgl3Cursor.dispose(this)
         graphics!!.dispose()
-        input?.dispose()
+        input!!.dispose()
         GLFW.glfwSetWindowFocusCallback(windowHandle, null)
         GLFW.glfwSetWindowIconifyCallback(windowHandle, null)
         GLFW.glfwSetWindowCloseCallback(windowHandle, null)
@@ -421,16 +417,6 @@ class Lwjgl3Window internal constructor(
             for (pixmap in tmpPixmaps) {
                 pixmap?.dispose()
             }
-        }
-
-        fun setSizeLimits(windowHandle: Long, minWidth: Int, minHeight: Int, maxWidth: Int, maxHeight: Int) {
-            GLFW.glfwSetWindowSizeLimits(
-                windowHandle,
-                if (minWidth > -1) minWidth else GLFW.GLFW_DONT_CARE,
-                if (minHeight > -1) minHeight else GLFW.GLFW_DONT_CARE,
-                if (maxWidth > -1) maxWidth else GLFW.GLFW_DONT_CARE,
-                if (maxHeight > -1) maxHeight else GLFW.GLFW_DONT_CARE
-            )
         }
     }
 }

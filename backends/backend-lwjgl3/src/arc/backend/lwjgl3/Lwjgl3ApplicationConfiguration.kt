@@ -33,15 +33,15 @@ import java.awt.DisplayMode
 import java.io.PrintStream
 import kotlin.math.max
 
-class Lwjgl3ApplicationConfiguration : Lwjgl3WindowConfiguration() {
+open class Lwjgl3ApplicationConfiguration : Lwjgl3WindowConfiguration() {
     var disableAudio: Boolean = false
 
     /** The maximum number of threads to use for network requests. Default is [Integer.MAX_VALUE].  */
     private var maxNetThreads: Int = Int.MAX_VALUE
 
-    private var audioDeviceSimultaneousSources: Int = 16
-    private var audioDeviceBufferSize: Int = 512
-    private var audioDeviceBufferCount: Int = 9
+    internal var audioDeviceSimultaneousSources: Int = 16
+    var audioDeviceBufferSize: Int = 512
+    var audioDeviceBufferCount: Int = 9
 
     enum class GLEmulation {
         ANGLE_GLES20, GL20, GL30, GL31, GL32

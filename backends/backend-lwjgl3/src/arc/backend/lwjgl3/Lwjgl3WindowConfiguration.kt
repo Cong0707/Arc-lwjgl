@@ -19,6 +19,7 @@ import arc.Files
 import arc.graphics.Color
 import arc.Files.FileType
 import arc.Graphics
+import arc.struct.Seq
 import java.awt.DisplayMode
 
 open class Lwjgl3WindowConfiguration {
@@ -36,7 +37,7 @@ open class Lwjgl3WindowConfiguration {
     var maximizedMonitor: Lwjgl3Graphics.Lwjgl3Monitor? = null
     var autoIconify: Boolean = true
     var windowIconFileType: Files.FileType? = null
-    var windowIconPaths: Array<String?>? = null
+    var windowIconPaths: Seq<String?>? = null
     var windowListener: Lwjgl3WindowListener? = null
     var fullscreenMode: Lwjgl3Graphics.Lwjgl3DisplayMode? = null
     var title: String? = null
@@ -60,7 +61,7 @@ open class Lwjgl3WindowConfiguration {
         autoIconify = config.autoIconify
         windowIconFileType = config.windowIconFileType
         if (config.windowIconPaths != null) windowIconPaths =
-            config.windowIconPaths!!.copyOf(config.windowIconPaths!!.size)
+            config.windowIconPaths!!.copy()
         windowListener = config.windowListener
         fullscreenMode = config.fullscreenMode
         title = config.title
@@ -127,7 +128,7 @@ open class Lwjgl3WindowConfiguration {
      */
     fun setWindowIcon(fileType: Files.FileType?, vararg filePaths: String?) {
         windowIconFileType = fileType
-        windowIconPaths = filePaths.toList().toTypedArray()
+        windowIconPaths = Seq<String?>(filePaths)
     }
 
     /** Sets the app to use fullscreen mode. Use the static methods like [Lwjgl3ApplicationConfiguration.getDisplayMode] on

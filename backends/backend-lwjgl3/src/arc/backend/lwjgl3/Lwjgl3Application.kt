@@ -1,35 +1,24 @@
-/*******************************************************************************
- * Copyright 2011 See AUTHORS file.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 package arc.backend.lwjgl3
 
 import arc.*
 import arc.Application.ApplicationType
 import arc.audio.Audio
+import arc.backend.lwjgl3.*
 import arc.backend.lwjgl3.Lwjgl3ApplicationConfiguration.GLEmulation
 import arc.func.Cons
 import arc.graphics.gl.GLVersion
 import arc.math.geom.Point2
 import arc.mock.MockAudio
 import arc.struct.Seq
-import arc.util.*
+import arc.util.ArcNativesLoader
+import arc.util.ArcRuntimeException
+import arc.util.Log
+import arc.util.OS
 import org.lwjgl.glfw.GLFW
 import org.lwjgl.glfw.GLFWErrorCallback
-import org.lwjgl.opengl.*
-import org.lwjgl.system.Callback
-import java.nio.IntBuffer
+import org.lwjgl.opengl.GL
+import org.lwjgl.opengl.GL11
+import java.lang.reflect.Method
 import kotlin.concurrent.Volatile
 import kotlin.math.max
 import kotlin.math.min
@@ -45,13 +34,14 @@ class Lwjgl3Application @JvmOverloads constructor(
     @Volatile
     private var currentWindow: Lwjgl3Window? = null
     private var audio: Audio? = null
+    private val files: Files
 
     @Volatile
     private var running = true
-    private val runnables = TaskQueue()
+    private val runnables = Seq<Runnable>()
+    private val executedRunnables = Seq<Runnable>()
+    private val applicationListeners: Seq<ApplicationListener> = Seq<ApplicationListener>()
     private val sync: Sync
-
-    private val listeners = Seq<ApplicationListener>()
 
     init {
         var config = config
@@ -63,18 +53,20 @@ class Lwjgl3Application @JvmOverloads constructor(
         if (config.title == null) config.title = listener.javaClass.simpleName
 
         Core.app = this
+        Core.settings = Settings()
         if (!config.disableAudio) {
             try {
                 this.audio = Audio(!config.disableAudio);
             } catch (t: Throwable) {
-                Log.info("Lwjgl3Application", "Couldn't initialize audio, disabling audio", t)
+                Log.err("Lwjgl3Application", "Couldn't initialize audio, disabling audio", t)
                 this.audio = MockAudio()
             }
         } else {
             this.audio = MockAudio()
         }
         Core.audio = audio
-        Core.files = Lwjgl3Files()
+        Core.files = createFiles()
+        this.files = Core.files
 
         this.sync = Sync()
 
@@ -95,7 +87,6 @@ class Lwjgl3Application @JvmOverloads constructor(
     protected fun loop() {
         val closedWindows = Seq<Lwjgl3Window>()
         while (running && windows.size > 0) {
-
             var haveWindowsRendered = false
             closedWindows.clear()
             var targetFramerate = -2
@@ -104,20 +95,50 @@ class Lwjgl3Application @JvmOverloads constructor(
                     window.makeCurrent()
                     currentWindow = window
                 }
-                if (targetFramerate == -2) targetFramerate = window.getConfig().foregroundFPS
+                if (targetFramerate == -2) targetFramerate = window.config.foregroundFPS
+                synchronized(applicationListeners) {
+                    haveWindowsRendered = haveWindowsRendered or window.update()
+                }
                 if (window.shouldClose()) {
                     closedWindows.add(window)
                 }
             }
             GLFW.glfwPollEvents()
 
-            runnables.run()
+            defaultUpdate()
 
-            for (window in windows) {
-                if (!window.graphics!!.isContinuousRendering) window.requestRendering()
+            listen { obj: ApplicationListener -> obj.update() }
+
+            val shouldRequestRendering: Boolean
+            synchronized(runnables) {
+                shouldRequestRendering = runnables.size > 0
+                executedRunnables.clear()
+                executedRunnables.addAll(runnables)
+                runnables.clear()
+            }
+            for (runnable in executedRunnables) {
+                runnable.run()
+            }
+            if (shouldRequestRendering) {
+                // Must follow Runnables execution so changes done by Runnables are reflected
+                // in the following render.
+                for (window in windows) {
+                    if (!Core.graphics.isContinuousRendering()) window.requestRendering()
+                }
             }
 
             for (closedWindow in closedWindows) {
+                if (windows.size === 1) {
+                    // Lifecycle listener methods have to be called before ApplicationListener methods. The
+                    // application will be disposed when _all_ windows have been disposed, which is the case,
+                    // when there is only 1 window left, which is in the process of being disposed.
+                    for (i in applicationListeners.size - 1 downTo 0) {
+                        val l: ApplicationListener = applicationListeners[i]
+                        l.pause()
+                        l.dispose()
+                    }
+                    applicationListeners.clear()
+                }
                 closedWindow.dispose()
 
                 windows.remove(closedWindow, false)
@@ -137,7 +158,21 @@ class Lwjgl3Application @JvmOverloads constructor(
         }
     }
 
+    private fun listen(cons: Cons<ApplicationListener>) {
+        synchronized(listeners) {
+            for (l in listeners) {
+                cons[l]
+            }
+        }
+    }
+
     protected fun cleanupWindows() {
+        synchronized(applicationListeners) {
+            for (applicationListener1 in applicationListeners) {
+                applicationListener1.pause()
+                applicationListener1.dispose()
+            }
+        }
         for (window in windows) {
             window.dispose()
         }
@@ -149,28 +184,22 @@ class Lwjgl3Application @JvmOverloads constructor(
         audio?.dispose()
         errorCallback!!.free()
         errorCallback = null
-        if (glDebugCallback != null) {
-            glDebugCallback!!.free()
-            glDebugCallback = null
-        }
         GLFW.glfwTerminate()
     }
 
     val applicationListener: ApplicationListener
         get() = currentWindow!!.listener
 
-    val graphics: Graphics?
-        get() = currentWindow!!.graphics
+    fun getAudio(): Audio? {
+        return audio
+    }
 
-    val input: Input?
-        get() = currentWindow!!.getInput()
-
-    fun createInput(window: Lwjgl3Window?): Lwjgl3Input {
-        return Lwjgl3Input(window!!)
+    fun getFiles(): Files {
+        return files
     }
 
     override fun getListeners(): Seq<ApplicationListener> {
-        return listeners
+        return applicationListeners
     }
 
     override fun getType(): ApplicationType {
@@ -178,27 +207,41 @@ class Lwjgl3Application @JvmOverloads constructor(
     }
 
     override fun getClipboardText(): String {
-        return GLFW.glfwGetClipboardString((Core.graphics as Lwjgl3Graphics).window.windowHandle) ?: ""
+        return GLFW.glfwGetClipboardString((Core.graphics as Lwjgl3Graphics).window.windowHandle)!!
     }
 
     override fun setClipboardText(text: String?) {
-        GLFW.glfwSetClipboardString((Core.graphics as Lwjgl3Graphics).window.windowHandle, text ?: "")
+        GLFW.glfwSetClipboardString((Core.graphics as Lwjgl3Graphics).window.windowHandle, text)
     }
 
     override fun post(runnable: Runnable?) {
-        runnables.post(runnable)
+        synchronized(runnables) {
+            runnables.add(runnable)
+        }
     }
 
     override fun exit() {
         running = false
     }
 
-    private fun listen(cons: Cons<ApplicationListener>) {
-        synchronized(listeners) {
-            for (l in listeners) {
-                cons[l]
-            }
+    fun addLifecycleListener(listener: ApplicationListener?) {
+        synchronized(applicationListeners) {
+            applicationListeners.add(listener)
         }
+    }
+
+    fun removeLifecycleListener(listener: ApplicationListener?) {
+        synchronized(applicationListeners) {
+            applicationListeners.remove(listener, true)
+        }
+    }
+
+    fun createInput(window: Lwjgl3Window): Lwjgl3Input {
+        return Lwjgl3Input(window)
+    }
+
+    protected fun createFiles(): Files {
+        return Lwjgl3Files()
     }
 
     /** Creates a new [Lwjgl3Window] using the provided listener and [Lwjgl3WindowConfiguration].
@@ -216,7 +259,7 @@ class Lwjgl3Application @JvmOverloads constructor(
         config: Lwjgl3ApplicationConfiguration, listener: ApplicationListener,
         sharedContext: Long
     ): Lwjgl3Window {
-        val window = Lwjgl3Window(listener, config, this)
+        val window = Lwjgl3Window(listener, applicationListeners, config, this)
         if (sharedContext == 0L) {
             // the main window is created immediately
             createWindow(window, config, sharedContext)
@@ -236,11 +279,11 @@ class Lwjgl3Application @JvmOverloads constructor(
         window.setVisible(config.initialVisible)
 
         for (i in 0..1) {
-            window.graphics!!.gl20!!.glClearColor(
+            Core.gl20.glClearColor(
                 config.initialBackgroundColor.r, config.initialBackgroundColor.g,
                 config.initialBackgroundColor.b, config.initialBackgroundColor.a
             )
-            window.graphics!!.gl20!!.glClear(GL11.GL_COLOR_BUFFER_BIT)
+            Core.gl20.glClear(GL11.GL_COLOR_BUFFER_BIT)
             GLFW.glfwSwapBuffers(windowHandle)
         }
 
@@ -251,32 +294,11 @@ class Lwjgl3Application @JvmOverloads constructor(
         }
     }
 
-    enum class GLDebugMessageSeverity(val gl43: Int, val khr: Int, val arb: Int, val amd: Int) {
-        HIGH(
-            GL43.GL_DEBUG_SEVERITY_HIGH, KHRDebug.GL_DEBUG_SEVERITY_HIGH, ARBDebugOutput.GL_DEBUG_SEVERITY_HIGH_ARB,
-            AMDDebugOutput.GL_DEBUG_SEVERITY_HIGH_AMD
-        ),
-        MEDIUM(
-            GL43.GL_DEBUG_SEVERITY_MEDIUM, KHRDebug.GL_DEBUG_SEVERITY_MEDIUM,
-            ARBDebugOutput.GL_DEBUG_SEVERITY_MEDIUM_ARB, AMDDebugOutput.GL_DEBUG_SEVERITY_MEDIUM_AMD
-        ),
-        LOW(
-            GL43.GL_DEBUG_SEVERITY_LOW, KHRDebug.GL_DEBUG_SEVERITY_LOW, ARBDebugOutput.GL_DEBUG_SEVERITY_LOW_ARB,
-            AMDDebugOutput.GL_DEBUG_SEVERITY_LOW_AMD
-        ),
-        NOTIFICATION(
-            GL43.GL_DEBUG_SEVERITY_NOTIFICATION,
-            KHRDebug.GL_DEBUG_SEVERITY_NOTIFICATION, -1, -1
-        )
-    }
-
     companion object {
         private var errorCallback: GLFWErrorCallback? = null
         private var glVersion: GLVersion? = null
-        private var glDebugCallback: Callback? = null
         fun initializeGlfw() {
             if (errorCallback == null) {
-                System.setProperty("org.lwjgl.input.Mouse.allowNegativeMouseCoords", "true")//from gdx
                 ArcNativesLoader.load()
                 errorCallback = GLFWErrorCallback.createPrint(Lwjgl3ApplicationConfiguration.errorStream)
                 GLFW.glfwSetErrorCallback(errorCallback)
@@ -293,8 +315,8 @@ class Lwjgl3Application @JvmOverloads constructor(
 
         fun loadANGLE() {
             try {
-                val angleLoader = Class.forName("arc.backend.lwjgl3.angle.ANGLELoader")
-                val load = angleLoader.getMethod("load")
+                val angleLoader = Class.forName("com.badlogic.gdx.backends.lwjgl3.angle.ANGLELoader")
+                val load: Method = angleLoader.getMethod("load")
                 load.invoke(angleLoader)
             } catch (t: ClassNotFoundException) {
                 return
@@ -305,8 +327,8 @@ class Lwjgl3Application @JvmOverloads constructor(
 
         fun postLoadANGLE() {
             try {
-                val angleLoader = Class.forName("arc.backend.lwjgl3.angle.ANGLELoader")
-                val load = angleLoader.getMethod("postGlfwInit")
+                val angleLoader = Class.forName("com.badlogic.gdx.backends.lwjgl3.angle.ANGLELoader")
+                val load: Method = angleLoader.getMethod("postGlfwInit")
                 load.invoke(angleLoader)
             } catch (t: ClassNotFoundException) {
                 return
@@ -359,7 +381,7 @@ class Lwjgl3Application @JvmOverloads constructor(
 
             var windowHandle: Long = 0
 
-            if (config.fullscreenMode !== null) {
+            if (config.fullscreenMode != null) {
                 GLFW.glfwWindowHint(GLFW.GLFW_REFRESH_RATE, config.fullscreenMode!!.refreshRate)
                 windowHandle = GLFW.glfwCreateWindow(
                     config.fullscreenMode!!.width, config.fullscreenMode!!.height, config.title,
@@ -399,11 +421,11 @@ class Lwjgl3Application @JvmOverloads constructor(
             if (windowHandle == 0L) {
                 throw ArcRuntimeException("Couldn't create window")
             }
-            Lwjgl3Window.setSizeLimits(
-                windowHandle.toInt().toLong(), config.windowMinWidth, config.windowMinHeight, config.windowMaxWidth,
+/*            Lwjgl3Window.setSizeLimits(
+                windowHandle, config.windowMinWidth, config.windowMinHeight, config.windowMaxWidth,
                 config.windowMaxHeight
-            )
-            if (config.fullscreenMode === null) {
+            )*/
+            if (config.fullscreenMode == null) {
                 if (GLFW.glfwGetPlatform() != GLFW.GLFW_PLATFORM_WAYLAND) {
                     if (config.windowX == -1 && config.windowY == -1) { // i.e., center the window
                         var windowWidth = max(config.windowWidth.toDouble(), config.windowMinWidth.toDouble()).toInt()
@@ -433,7 +455,7 @@ class Lwjgl3Application @JvmOverloads constructor(
                 }
             }
             if (config.windowIconPaths != null) {
-                Lwjgl3Window.setIcon(windowHandle, config.windowIconPaths!!, config.windowIconFileType)
+                Lwjgl3Window.setIcon(windowHandle, config.windowIconPaths!!.toArray(), config.windowIconFileType)
             }
             GLFW.glfwMakeContextCurrent(windowHandle)
             GLFW.glfwSwapInterval(if (config.vSyncEnabled) 1 else 0)
@@ -467,8 +489,6 @@ class Lwjgl3Application @JvmOverloads constructor(
 
             if (config.debug) {
                 check(config.glEmulation != GLEmulation.ANGLE_GLES20) { "ANGLE currently can't be used with with Lwjgl3ApplicationConfiguration#enableGLDebugOutput" }
-                glDebugCallback = GLUtil.setupDebugMessageCallback(config.debugStream)
-                setGLDebugMessageControl(GLDebugMessageSeverity.NOTIFICATION, false)
             }
 
             return windowHandle
@@ -483,7 +503,7 @@ class Lwjgl3Application @JvmOverloads constructor(
             } else {
                 try {
                     val gles = Class.forName("org.lwjgl.opengles.GLES20")
-                    val getString = gles.getMethod("glGetString", Int::class.javaPrimitiveType)
+                    val getString: Method = gles.getMethod("glGetString", Int::class.javaPrimitiveType)
                     val versionString = getString.invoke(gles, GL11.GL_VERSION) as String
                     val vendorString = getString.invoke(gles, GL11.GL_VENDOR) as String
                     val rendererString = getString.invoke(gles, GL11.GL_RENDERER) as String
@@ -498,43 +518,6 @@ class Lwjgl3Application @JvmOverloads constructor(
             // FBO is in core since OpenGL 3.0, see https://www.opengl.org/wiki/Framebuffer_Object
             return glVersion!!.atLeast(3, 0) || GLFW.glfwExtensionSupported("GL_EXT_framebuffer_object")
                     || GLFW.glfwExtensionSupported("GL_ARB_framebuffer_object")
-        }
-
-        /** Enables or disables GL debug messages for the specified severity level. Returns false if the severity level could not be
-         * set (e.g. the NOTIFICATION level is not supported by the ARB and AMD extensions).
-         *
-         * See [Lwjgl3ApplicationConfiguration.enableGLDebugOutput]  */
-        fun setGLDebugMessageControl(severity: GLDebugMessageSeverity, enabled: Boolean): Boolean {
-            val caps = GL.getCapabilities()
-            val GL_DONT_CARE = 0x1100 // not defined anywhere yet
-
-            if (caps.OpenGL43) {
-                GL43.glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, severity.gl43, null as IntBuffer?, enabled)
-                return true
-            }
-
-            if (caps.GL_KHR_debug) {
-                KHRDebug.glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, severity.khr, null as IntBuffer?, enabled)
-                return true
-            }
-
-            if (caps.GL_ARB_debug_output && severity.arb != -1) {
-                ARBDebugOutput.glDebugMessageControlARB(
-                    GL_DONT_CARE,
-                    GL_DONT_CARE,
-                    severity.arb,
-                    null as IntBuffer?,
-                    enabled
-                )
-                return true
-            }
-
-            if (caps.GL_AMD_debug_output && severity.amd != -1) {
-                AMDDebugOutput.glDebugMessageEnableAMD(GL_DONT_CARE, severity.amd, null as IntBuffer?, enabled)
-                return true
-            }
-
-            return false
         }
     }
 }

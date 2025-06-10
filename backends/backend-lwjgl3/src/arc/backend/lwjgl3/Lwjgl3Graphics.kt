@@ -1,9 +1,10 @@
 package arc.backend.lwjgl3
 
 import arc.Application
+import arc.Core
+import arc.Core.gl20
 import arc.Graphics
 import arc.Graphics.Cursor.SystemCursor
-import arc.backend.lwjgl3.*
 import arc.graphics.GL20
 import arc.graphics.GL30
 import arc.graphics.Pixmap
@@ -20,9 +21,8 @@ import org.lwjgl.opengl.GL11
 import java.nio.IntBuffer
 import kotlin.concurrent.Volatile
 
+
 class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
-    var gl20: GL20? = null
-    private var gl30: GL30? = null
     private var gLVersion: GLVersion? = null
 
     @Volatile
@@ -64,7 +64,7 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
                     return
                 }
                 window.makeCurrent()
-                gl20?.glViewport(0, 0, backBufferWidth, backBufferHeight)
+                Core.gl20?.glViewport(0, 0, backBufferWidth, backBufferHeight)
                 window.listener.resize(width, height)
                 update()
                 window.listener.update()
@@ -76,25 +76,28 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     init {
-        if (window.getConfig().glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL32) {
-            this.gl30 = Lwjgl3GL30()
-            this.gl20 = this.gl30
-        } else if (window.getConfig().glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL31) {
-            this.gl30 = Lwjgl3GL30()
-            this.gl20 = this.gl30
-        } else if (window.getConfig().glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL30) {
-            this.gl30 = Lwjgl3GL30()
-            this.gl20 = this.gl30
+        if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL32) {
+            Core.gl30 = Lwjgl3GL30()
+            Core.gl20 = Core.gl30
+            Core.gl = Core.gl20
+        } else if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL31) {
+            Core.gl30 = Lwjgl3GL30()
+            Core.gl20 = Core.gl30
+            Core.gl = Core.gl20
+        } else if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL30) {
+            Core.gl30 = Lwjgl3GL30()
+            Core.gl20 = Core.gl30
+            Core.gl = Core.gl20
         } else {
             try {
-                this.gl20 = if (window.getConfig().glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL20)
+                Core.gl20 = if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL20)
                     Lwjgl3GL20()
                 else
                     Class.forName("com.badlogic.gdx.backends.lwjgl3.angle.Lwjgl3GLES20").newInstance() as GL20
             } catch (t: Throwable) {
                 throw ArcRuntimeException("Couldn't instantiate GLES20.", t)
             }
-            this.gl30 = null
+            Core.gl30 = null
         }
         updateFramebufferInfo()
         initiateGL()
@@ -102,9 +105,9 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     private fun initiateGL() {
-        val versionString: String = gl20!!.glGetString(GL11.GL_VERSION)
-        val vendorString: String = gl20!!.glGetString(GL11.GL_VENDOR)
-        val rendererString: String = gl20!!.glGetString(GL11.GL_RENDERER)
+        val versionString: String = Core.gl20!!.glGetString(GL11.GL_VERSION)
+        val vendorString: String = Core.gl20!!.glGetString(GL11.GL_VENDOR)
+        val rendererString: String = Core.gl20!!.glGetString(GL11.GL_RENDERER)
         gLVersion = GLVersion(Application.ApplicationType.desktop, versionString, vendorString, rendererString)
     }
 
@@ -115,7 +118,7 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
         GLFW.glfwGetWindowSize(window.windowHandle, tmpBuffer, tmpBuffer2)
         this@Lwjgl3Graphics.logicalWidth = tmpBuffer[0]
         this@Lwjgl3Graphics.logicalHeight = tmpBuffer2[0]
-        val config = window.getConfig()
+        val config = window.config
         bufferFormat = BufferFormat(
             config.r, config.g, config.b, config.a, config.depth, config.stencil, config.samples,
             false
@@ -141,27 +144,27 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     override fun isGL30Available(): Boolean {
-        return this.gl30 != null
+        return Core.gl30 != null
     }
 
     override fun getGL20(): GL20 {
-        return gl20!!
+        return Core.gl20!!
     }
 
     override fun setGL20(gl20: GL20?) {
-        this.gl20 = gl20
+        Core.gl20 = gl20
     }
 
     override fun getGL30(): GL30 {
-        return gl30!!
+        return Core.gl30!!
     }
 
     override fun setGL30(gl30: GL30?) {
-        this.gl30 = gl30
+        Core.gl30 = gl30
     }
 
     override fun getWidth(): Int {
-        return if (window.getConfig().hdpiMode == HdpiMode.pixels) {
+        return if (window.config.hdpiMode == HdpiMode.pixels) {
             backBufferWidth
         } else {
             logicalWidth
@@ -169,7 +172,7 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     override fun getHeight(): Int {
-        return if (window.getConfig().hdpiMode == HdpiMode.pixels) {
+        return if (window.config.hdpiMode == HdpiMode.pixels) {
             backBufferHeight
         } else {
             logicalHeight
@@ -197,7 +200,10 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     override fun getGLVersion(): GLVersion {
-        return glVersion
+        val versionString = gl20.glGetString(GL11.GL_VERSION)
+        val vendorString = gl20.glGetString(GL11.GL_VENDOR)
+        val rendererString = gl20.glGetString(GL11.GL_RENDERER)
+        return GLVersion(Application.ApplicationType.desktop, versionString, vendorString, rendererString);
     }
 
     fun resetDeltaTime() {
@@ -291,7 +297,7 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     fun setFullscreenMode(displayMode: Lwjgl3DisplayMode): Boolean {
-        window.getInput()!!.resetPollingStates()
+        window.input!!.resetPollingStates()
         val newMode = displayMode as Lwjgl3DisplayMode
         if (isFullscreen) {
             val currentMode = this.getDisplayMode() as Lwjgl3DisplayMode
@@ -317,7 +323,7 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
         }
         updateFramebufferInfo()
 
-        setVSync(window.getConfig().vSyncEnabled)
+        setVSync(window.config.vSyncEnabled)
 
         return true
     }
@@ -331,7 +337,7 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     override fun setWindowedMode(width: Int, height: Int): Boolean {
-        window.getInput()!!.resetPollingStates()
+        window.input!!.resetPollingStates()
         if (!isFullscreen) {
             var newPos: Point2? = null
             var centerWindow = false
@@ -388,7 +394,7 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     override fun setResizable(resizable: Boolean) {
-        window.getConfig().setResizable(resizable)
+        window.config.setResizable(resizable)
         GLFW.glfwSetWindowAttrib(
             window.windowHandle,
             GLFW.GLFW_RESIZABLE,
@@ -397,7 +403,7 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     override fun setVSync(vsync: Boolean) {
-        window.getConfig().vSyncEnabled = vsync
+        window.config.vSyncEnabled = vsync
         GLFW.glfwSwapInterval(if (vsync) 1 else 0)
     }
 
@@ -411,7 +417,7 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
      * @param fps fps
      */
     fun setForegroundFPS(fps: Int) {
-        window.getConfig().foregroundFPS = fps
+        window.config.foregroundFPS = fps
     }
 
     override fun supportsExtension(extension: String): Boolean {
