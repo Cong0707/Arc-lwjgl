@@ -356,7 +356,7 @@ class Lwjgl3Application @JvmOverloads constructor(
             GLFW.glfwWindowHint(GLFW.GLFW_DEPTH_BITS, config.depth)
             GLFW.glfwWindowHint(GLFW.GLFW_SAMPLES, config.samples)
 
-            if (config.glEmulation == GLEmulation.GL30 || config.glEmulation == GLEmulation.GL31 || config.glEmulation == GLEmulation.GL32) {
+            if (config.glEmulation == GLEmulation.GL30) {
                 GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MAJOR, config.gles30ContextMajorVersion)
                 GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MINOR, config.gles30ContextMinorVersion)
                 if (OS.isMac) {

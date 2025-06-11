@@ -77,15 +77,7 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     init {
-        if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL32) {
-            Core.gl30 = Lwjgl3GL30()
-            Core.gl20 = Core.gl30
-            Core.gl = Core.gl20
-        } else if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL31) {
-            Core.gl30 = Lwjgl3GL30()
-            Core.gl20 = Core.gl30
-            Core.gl = Core.gl20
-        } else if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL30) {
+        if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL30) {
             Core.gl30 = Lwjgl3GL30()
             Core.gl20 = Core.gl30
             Core.gl = Core.gl20
