@@ -308,6 +308,12 @@ class Lwjgl3Application @JvmOverloads constructor(
                     GLFW.GLFW_ANGLE_PLATFORM_TYPE,
                     GLFW.GLFW_ANGLE_PLATFORM_TYPE_METAL
                 )
+
+                GLFW.glfwInitHint(
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE,
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE_METAL // i test all of this and found this is the best which can be loaded in 5000ms
+                )
+
                 GLFW.glfwInitHint(GLFW.GLFW_JOYSTICK_HAT_BUTTONS, GLFW.GLFW_FALSE)
                 if (!GLFW.glfwInit()) {
                     throw ArcRuntimeException("Unable to initialize GLFW")
