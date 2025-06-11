@@ -322,7 +322,7 @@ class Lwjgl3Window internal constructor(
 
     fun makeCurrent() {
         Core.graphics = graphics
-        Core.gl30 = graphics!!.gL30
+        Core.gl30 = graphics?.gL30
         Core.gl20 = if (Core.gl30 != null) Core.gl30 else graphics!!.gL20
         Core.gl = Core.gl20
         Core.input = input

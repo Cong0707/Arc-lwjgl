@@ -26,7 +26,6 @@ include ":backends:backend-sdl3"
 include ":backends:backend-robovm"
 
 include ":backends:backend-lwjgl3"
-include ":backends:backend-gwt"
 
 include ":natives"
 include ":natives:natives-desktop"

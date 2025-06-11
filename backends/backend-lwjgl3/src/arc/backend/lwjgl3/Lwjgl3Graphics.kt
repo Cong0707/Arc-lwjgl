@@ -93,7 +93,7 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
                 Core.gl20 = if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL20)
                     Lwjgl3GL20()
                 else
-                    Class.forName("com.badlogic.gdx.backends.lwjgl3.angle.Lwjgl3GLES20").newInstance() as GL20
+                    Class.forName("arc.backend.lwjgl3.angle.Lwjgl3GLES20").newInstance() as GL20
             } catch (t: Throwable) {
                 throw ArcRuntimeException("Couldn't instantiate GLES20.", t)
             }
@@ -148,15 +148,15 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     override fun getGL20(): GL20 {
-        return Core.gl20!!
+        return Core.gl20
     }
 
     override fun setGL20(gl20: GL20?) {
         Core.gl20 = gl20
     }
 
-    override fun getGL30(): GL30 {
-        return Core.gl30!!
+    override fun getGL30(): GL30? {
+        return Core.gl30
     }
 
     override fun setGL30(gl30: GL30?) {
@@ -273,7 +273,7 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
 
     fun getMonitors(): Seq<Lwjgl3Monitor?> {
         val glfwMonitors = GLFW.glfwGetMonitors()
-        val monitors: Seq<Lwjgl3Monitor?> = Seq<Lwjgl3Monitor?>(glfwMonitors.limit())
+        val monitors: Seq<Lwjgl3Monitor?> = Seq<Lwjgl3Monitor?>(glfwMonitors!!.limit())
         for (i in 0..<glfwMonitors.limit()) {
             monitors[i] = Lwjgl3ApplicationConfiguration.toLwjgl3Monitor(glfwMonitors[i])
         }

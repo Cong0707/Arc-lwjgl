@@ -15,6 +15,8 @@ import arc.util.ArcRuntimeException
 import arc.util.Log
 import arc.util.OS
 import org.lwjgl.glfw.GLFW
+import org.lwjgl.glfw.GLFW.GLFW_ANGLE_PLATFORM_TYPE
+import org.lwjgl.glfw.GLFW.GLFW_ANGLE_PLATFORM_TYPE_VULKAN
 import org.lwjgl.glfw.GLFWErrorCallback
 import org.lwjgl.opengl.GL
 import org.lwjgl.opengl.GL11
@@ -315,9 +317,7 @@ class Lwjgl3Application @JvmOverloads constructor(
 
         fun loadANGLE() {
             try {
-                val angleLoader = Class.forName("com.badlogic.gdx.backends.lwjgl3.angle.ANGLELoader")
-                val load: Method = angleLoader.getMethod("load")
-                load.invoke(angleLoader)
+                arc.backend.lwjgl3.angle.ANGLELoader.load()
             } catch (t: ClassNotFoundException) {
                 return
             } catch (t: Throwable) {
@@ -327,9 +327,7 @@ class Lwjgl3Application @JvmOverloads constructor(
 
         fun postLoadANGLE() {
             try {
-                val angleLoader = Class.forName("com.badlogic.gdx.backends.lwjgl3.angle.ANGLELoader")
-                val load: Method = angleLoader.getMethod("postGlfwInit")
-                load.invoke(angleLoader)
+                arc.backend.lwjgl3.angle.ANGLELoader.postGlfwInit()
             } catch (t: ClassNotFoundException) {
                 return
             } catch (t: Throwable) {
