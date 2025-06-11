@@ -44,7 +44,7 @@ open class Lwjgl3ApplicationConfiguration : Lwjgl3WindowConfiguration() {
     var audioDeviceBufferCount: Int = 9
 
     enum class GLEmulation {
-        ANGLE_GLES20, GL20, GL30, GL31, GL32
+        ANGLE_GLES20, GL20, ANGLE_GLES30, GL30, GL31, GL32
     }
 
     var glEmulation: GLEmulation = GLEmulation.GL20

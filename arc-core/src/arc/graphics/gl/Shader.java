@@ -171,14 +171,22 @@ public class Shader implements Disposable{
             //if there already is a version, do nothing
             //if on a desktop platform, pick 150 or 130 depending on supported version
             //if on anything else, it's GLES, so pick 300 ES
-            String version =
-                source.contains("#version ") ? "" :
-                Core.app.isDesktop() ? (Core.graphics.getGLVersion().atLeast(3, 2) ? "150" : "130") :
-                "300 es";
+            String version;
+            if (source.contains("#version ")) version = "";
+            else {
+                if (Core.app.isDesktop()) {
+                    if (Core.graphics.getGLVersion().rendererString.contains("ANGLE")) version = "300 es"; //GLES30 in angle
+                    else if (Core.graphics.getGLVersion().atLeast(3, 2)) version = "150";
+                    else version = "130";
+                }
+                else version = "300 es";
+            }
+
+            String floatp = "lowp";// lowp mediump highp
 
             return
                 "#version " + version + "\n"
-                + (fragment ? "out" + (Core.app.isMobile() ? " lowp" : "") + " vec4 fragColor;\n" : "")
+                + (fragment ? "out" + (Core.app.isMobile() ? " lowp" : (Core.graphics.getGLVersion().rendererString.contains("ANGLE")) ? " " + floatp : "") + " vec4 fragColor;\n" : "")
                 + source
                 .replace("varying", fragment ? "in" : "out")
                 .replace("attribute", fragment ? "???" : "in")

@@ -22,7 +22,7 @@ import arc.util.Buffers
 import org.lwjgl.opengles.GLES20
 import java.nio.*
 
-class Lwjgl3GLES20 : GL20 {
+open class Lwjgl3GLES20 : GL20 {
     private var buffer: ByteBuffer? = null
     private var floatBuffer: FloatBuffer? = null
     private var intBuffer: IntBuffer? = null
@@ -213,7 +213,7 @@ class Lwjgl3GLES20 : GL20 {
         GLES20.glDeleteBuffers(buffer)
     }
 
-    fun glDeleteFramebuffers(n: Int, framebuffers: IntBuffer) {
+    open fun glDeleteFramebuffers(n: Int, framebuffers: IntBuffer) {
         GLES20.glDeleteFramebuffers(framebuffers)
     }
 
@@ -225,7 +225,7 @@ class Lwjgl3GLES20 : GL20 {
         GLES20.glDeleteProgram(program)
     }
 
-    fun glDeleteRenderbuffers(n: Int, renderbuffers: IntBuffer) {
+    open fun glDeleteRenderbuffers(n: Int, renderbuffers: IntBuffer) {
         GLES20.glDeleteRenderbuffers(renderbuffers)
     }
 
@@ -337,7 +337,7 @@ class Lwjgl3GLES20 : GL20 {
         return GLES20.glGenBuffers()
     }
 
-    fun glGenFramebuffers(n: Int, framebuffers: IntBuffer) {
+    open fun glGenFramebuffers(n: Int, framebuffers: IntBuffer) {
         GLES20.glGenFramebuffers(framebuffers)
     }
 
@@ -345,7 +345,7 @@ class Lwjgl3GLES20 : GL20 {
         return GLES20.glGenFramebuffers()
     }
 
-    fun glGenRenderbuffers(n: Int, renderbuffers: IntBuffer) {
+    open fun glGenRenderbuffers(n: Int, renderbuffers: IntBuffer) {
         GLES20.glGenRenderbuffers(renderbuffers)
     }
 

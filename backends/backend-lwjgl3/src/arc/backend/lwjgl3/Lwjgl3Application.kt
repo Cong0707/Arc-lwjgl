@@ -47,7 +47,7 @@ class Lwjgl3Application @JvmOverloads constructor(
 
     init {
         var config = config
-        if (config.glEmulation == GLEmulation.ANGLE_GLES20) loadANGLE()
+        if (config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30) loadANGLE()
         initializeGlfw()
 
         config = Lwjgl3ApplicationConfiguration.copy(config)
@@ -73,7 +73,7 @@ class Lwjgl3Application @JvmOverloads constructor(
         this.sync = Sync()
 
         val window = createWindow(config, listener, 0)
-        if (config.glEmulation == GLEmulation.ANGLE_GLES20) postLoadANGLE()
+        if (config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30) postLoadANGLE()
         windows.add(window)
         try {
             loop()
@@ -298,7 +298,7 @@ class Lwjgl3Application @JvmOverloads constructor(
 
     companion object {
         private var errorCallback: GLFWErrorCallback? = null
-        private var glVersion: GLVersion? = null
+        var glVersion: GLVersion? = null
         fun initializeGlfw() {
             if (errorCallback == null) {
                 ArcNativesLoader.load()
@@ -361,7 +361,7 @@ class Lwjgl3Application @JvmOverloads constructor(
                     GLFW.glfwWindowHint(GLFW.GLFW_OPENGL_PROFILE, GLFW.GLFW_OPENGL_CORE_PROFILE)
                 }
             } else {
-                if (config.glEmulation == GLEmulation.ANGLE_GLES20) {
+                if (config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30) {
                     GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_CREATION_API, GLFW.GLFW_EGL_CONTEXT_API)
                     GLFW.glfwWindowHint(GLFW.GLFW_CLIENT_API, GLFW.GLFW_OPENGL_ES_API)
                     GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MAJOR, 2)
@@ -388,7 +388,7 @@ class Lwjgl3Application @JvmOverloads constructor(
 
                 // On Ubuntu >= 22.04 with Nvidia GPU drivers and X11 display server there's a bug with EGL Context API
                 // If the windows creation has failed for this reason try to create it again with the native context
-                if (windowHandle == 0L && config.glEmulation == GLEmulation.ANGLE_GLES20) {
+                if (windowHandle == 0L && (config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30)) {
                     GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_CREATION_API, GLFW.GLFW_NATIVE_CONTEXT_API)
                     windowHandle = GLFW.glfwCreateWindow(
                         config.fullscreenMode!!.width, config.fullscreenMode!!.height, config.title,
@@ -405,7 +405,7 @@ class Lwjgl3Application @JvmOverloads constructor(
 
                 // On Ubuntu >= 22.04 with Nvidia GPU drivers and X11 display server there's a bug with EGL Context API
                 // If the windows creation has failed for this reason try to create it again with the native context
-                if (windowHandle == 0L && config.glEmulation == GLEmulation.ANGLE_GLES20) {
+                if (windowHandle == 0L && (config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30)) {
                     GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_CREATION_API, GLFW.GLFW_NATIVE_CONTEXT_API)
                     windowHandle = GLFW.glfwCreateWindow(
                         config.windowWidth,
@@ -457,7 +457,7 @@ class Lwjgl3Application @JvmOverloads constructor(
             }
             GLFW.glfwMakeContextCurrent(windowHandle)
             GLFW.glfwSwapInterval(if (config.vSyncEnabled) 1 else 0)
-            if (config.glEmulation == GLEmulation.ANGLE_GLES20) {
+            if (config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30) {
                 try {
                     val gles = Class.forName("org.lwjgl.opengles.GLES")
                     gles.getMethod("createCapabilities").invoke(gles)
@@ -468,7 +468,7 @@ class Lwjgl3Application @JvmOverloads constructor(
                 GL.createCapabilities()
             }
 
-            initiateGL(config.glEmulation == GLEmulation.ANGLE_GLES20)
+            initiateGL(config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30)
             if (!glVersion!!.atLeast(2, 0)) throw ArcRuntimeException(
                 ("""
     OpenGL 2.0 or higher with the FBO extension is required. OpenGL version: ${glVersion!!.debugVersionString}
@@ -476,7 +476,7 @@ class Lwjgl3Application @JvmOverloads constructor(
     """.trimIndent())
             )
 
-            if (config.glEmulation != GLEmulation.ANGLE_GLES20 && !supportsFBO()) {
+            if ((config.glEmulation != GLEmulation.ANGLE_GLES20 && config.glEmulation != GLEmulation.ANGLE_GLES30) && !supportsFBO()) {
                 throw ArcRuntimeException(
                     ("""
     OpenGL 2.0 or higher with the FBO extension is required. OpenGL version: ${glVersion!!.debugVersionString}, FBO extension: false
@@ -486,7 +486,7 @@ class Lwjgl3Application @JvmOverloads constructor(
             }
 
             if (config.debug) {
-                check(config.glEmulation != GLEmulation.ANGLE_GLES20) { "ANGLE currently can't be used with with Lwjgl3ApplicationConfiguration#enableGLDebugOutput" }
+                check(config.glEmulation != GLEmulation.ANGLE_GLES20 && config.glEmulation != GLEmulation.ANGLE_GLES30) { "ANGLE currently can't be used with with Lwjgl3ApplicationConfiguration#enableGLDebugOutput" }
             }
 
             return windowHandle

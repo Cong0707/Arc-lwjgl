@@ -14,6 +14,7 @@ import arc.math.geom.Point2
 import arc.struct.Seq
 import arc.util.ArcRuntimeException
 import arc.util.Disposable
+import arc.util.Log
 import org.lwjgl.BufferUtils
 import org.lwjgl.glfw.GLFW
 import org.lwjgl.glfw.GLFWFramebufferSizeCallback
@@ -88,19 +89,27 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
             Core.gl30 = Lwjgl3GL30()
             Core.gl20 = Core.gl30
             Core.gl = Core.gl20
-        } else {
+        } else if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.ANGLE_GLES30) {
+            Core.gl30 = Class.forName("arc.backend.lwjgl3.angle.Lwjgl3GLES30").newInstance() as GL30
+            Core.gl20 = Core.gl30
+            Core.gl = Core.gl20
+        } else if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.ANGLE_GLES20) {
+            Core.gl30 = null
+            Core.gl20 = Class.forName("arc.backend.lwjgl3.angle.Lwjgl3GLES20").newInstance() as GL20
+            Core.gl = Core.gl20
+        } else if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL20) {
             try {
-                Core.gl20 = if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL20)
-                    Lwjgl3GL20()
-                else
-                    Class.forName("arc.backend.lwjgl3.angle.Lwjgl3GLES20").newInstance() as GL20
+                Core.gl20 = Lwjgl3GL20()
             } catch (t: Throwable) {
-                throw ArcRuntimeException("Couldn't instantiate GLES20.", t)
+                throw ArcRuntimeException("Couldn't instantiate GL20.", t)
             }
             Core.gl30 = null
+        } else {
+            throw ArcRuntimeException("Couldn't find OpenGL.")
         }
         updateFramebufferInfo()
         initiateGL()
+        Log.info("Choosing GL Version @", Lwjgl3Application.glVersion!!.debugVersionString)
         GLFW.glfwSetFramebufferSizeCallback(window.windowHandle, resizeCallback)
     }
 
@@ -466,5 +475,10 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
         }
     }
 
-    class Lwjgl3Monitor internal constructor(val monitorHandle: Long, val virtualX: Int, val virtualY: Int, val name: String?)
+    class Lwjgl3Monitor internal constructor(
+        val monitorHandle: Long,
+        val virtualX: Int,
+        val virtualY: Int,
+        val name: String?
+    )
 }
