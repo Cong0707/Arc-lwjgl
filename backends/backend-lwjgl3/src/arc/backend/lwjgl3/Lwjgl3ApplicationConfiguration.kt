@@ -47,9 +47,15 @@ open class Lwjgl3ApplicationConfiguration : Lwjgl3WindowConfiguration() {
         ANGLE_GLES20, GL20, ANGLE_GLES30, GL30
     }
 
+    enum class GLAngleBackend {
+        none, d3d9, d3d11, opengl, opengles, metal, vulkan
+    }
+
     var glEmulation: GLEmulation = GLEmulation.GL20
     var gles30ContextMajorVersion: Int = 3
     var gles30ContextMinorVersion: Int = 2
+
+    var angleBackend = GLAngleBackend.none
 
     var r: Int = 8
     var g: Int = 8

@@ -15,8 +15,7 @@ import arc.util.ArcRuntimeException
 import arc.util.Log
 import arc.util.OS
 import org.lwjgl.glfw.GLFW
-import org.lwjgl.glfw.GLFW.GLFW_ANGLE_PLATFORM_TYPE
-import org.lwjgl.glfw.GLFW.GLFW_ANGLE_PLATFORM_TYPE_VULKAN
+import arc.backend.lwjgl3.Lwjgl3ApplicationConfiguration.GLAngleBackend.*
 import org.lwjgl.glfw.GLFWErrorCallback
 import org.lwjgl.opengl.GL
 import org.lwjgl.opengl.GL11
@@ -47,7 +46,40 @@ class Lwjgl3Application @JvmOverloads constructor(
 
     init {
         var config = config
-        if (config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30) loadANGLE()
+        if (config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30) {
+            // i test all of this and found metal is the best which can be loaded in 5000ms
+            when (config.angleBackend) {
+                none -> GLFW.glfwInitHint(
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE,
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE_NONE
+                )
+                vulkan -> GLFW.glfwInitHint(
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE,
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE_VULKAN
+                )
+                metal -> GLFW.glfwInitHint(
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE,
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE_METAL
+                )
+                d3d9 -> GLFW.glfwInitHint(
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE,
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE_D3D9
+                )
+                d3d11 -> GLFW.glfwInitHint(
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE,
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE_D3D11
+                )
+                opengl -> GLFW.glfwInitHint(
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE,
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE_OPENGL
+                )
+                opengles -> GLFW.glfwInitHint(
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE,
+                    GLFW.GLFW_ANGLE_PLATFORM_TYPE_OPENGLES
+                )
+            }
+            loadANGLE()
+        }
         initializeGlfw()
 
         config = Lwjgl3ApplicationConfiguration.copy(config)
@@ -308,12 +340,6 @@ class Lwjgl3Application @JvmOverloads constructor(
                     GLFW.GLFW_ANGLE_PLATFORM_TYPE,
                     GLFW.GLFW_ANGLE_PLATFORM_TYPE_METAL
                 )
-
-                GLFW.glfwInitHint(
-                    GLFW.GLFW_ANGLE_PLATFORM_TYPE,
-                    GLFW.GLFW_ANGLE_PLATFORM_TYPE_METAL // i test all of this and found this is the best which can be loaded in 5000ms
-                )
-
                 GLFW.glfwInitHint(GLFW.GLFW_JOYSTICK_HAT_BUTTONS, GLFW.GLFW_FALSE)
                 if (!GLFW.glfwInit()) {
                     throw ArcRuntimeException("Unable to initialize GLFW")
