@@ -157,6 +157,8 @@ public class Http{
 
     }
 
+    public static Cons<HttpRequest> onBeforeRequest;
+
     public static class HttpRequest{
         public HttpMethod method = HttpMethod.GET;
         /** The URL to send this request to.*/
@@ -245,6 +247,10 @@ public class Http{
             if(url == null){
                 errorHandler.get(new ArcRuntimeException("can't process a HTTP request without URL set"));
                 return;
+            }
+
+            if(onBeforeRequest != null){
+                onBeforeRequest.get(this);
             }
 
             try{
