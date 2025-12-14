@@ -69,12 +69,12 @@ public class KeyBind{
         Axis loaded;
         String name = settingsKey();
         if(settings.getBool(name + "-single", true)){
-            KeyCode key = KeyCode.byOrdinal(settings.getInt(name + "-key", KeyCode.unset.ordinal()));
-            loaded = key == KeyCode.unset ? null : new Axis(key);
+            KeyCode key = KeyCode.byOrdinal(settings.getInt(name + "-key", KeyCode.useDefault.ordinal()));
+            loaded = key == KeyCode.useDefault ? null : new Axis(key);
         }else{
-            KeyCode min = KeyCode.byOrdinal(settings.getInt(name + "-min", KeyCode.unset.ordinal()));
-            KeyCode max = KeyCode.byOrdinal(settings.getInt(name + "-max", KeyCode.unset.ordinal()));
-            loaded = min == KeyCode.unset || max == KeyCode.unset ? null : new Axis(min, max);
+            KeyCode min = KeyCode.byOrdinal(settings.getInt(name + "-min", KeyCode.useDefault.ordinal()));
+            KeyCode max = KeyCode.byOrdinal(settings.getInt(name + "-max", KeyCode.useDefault.ordinal()));
+            loaded = min == KeyCode.useDefault || max == KeyCode.useDefault ? null : new Axis(min, max);
         }
 
         if(loaded != null){

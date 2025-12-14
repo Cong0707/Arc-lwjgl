@@ -194,6 +194,7 @@ public enum KeyCode implements KeybindValue{
     f11(KeyType.key, "F11"),
     f12(KeyType.key, "F12"),
     unset(KeyType.key, "Unset"),
+    useDefault(KeyType.key, "useDefault"), //MDTX: special keycode representing the default keybind, not persisted
     application(KeyType.key, "Application"),
     asterisk(KeyType.key, "*"),
     capsLock(KeyType.key, "Caps Lock"),
