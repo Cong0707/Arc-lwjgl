@@ -38,7 +38,8 @@ public class SdlGraphics extends Graphics{
         this.app = app;
 
         Configuration.OPENGL_EXPLICIT_INIT.set(true);
-        GL.create(SDLVideo::SDL_GL_GetProcAddress);
+        //MDTX: skip if already initialized (for Loader)
+        if(GL.getFunctionProvider() == null) GL.create(SDLVideo::SDL_GL_GetProcAddress);
         GLCapabilities caps = GL.createCapabilities();
 
         Core.gl = Core.gl20 = gl20 = new SdlGL20();

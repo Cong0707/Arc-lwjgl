@@ -124,6 +124,20 @@ public class SdlApplication implements Application{
 
         if(OS.isMac) restartMac();
 
+        //MDTX: Special handle for Loader
+        if(System.getProperty("MDTX-SDL-window") != null){
+            Log.info("[Core] Initialize reusing window and context.");
+            window = Long.parseLong(System.getProperty("MDTX-SDL-window"));
+            context = Long.parseLong(System.getProperty("MDTX-SDL-context"));
+
+            config.width = Integer.parseInt(System.getProperty("MDTX-SDL-width"));
+            config.height = Integer.parseInt(System.getProperty("MDTX-SDL-height"));
+
+            String ver = SDLVersion.SDL_GetRevision();
+            Log.info("[Core] Initialized @", ver);
+            return;
+        }
+
         if(OS.isLinux && !OS.hasEnvFlag("MINDUSTRY_FORCE_WAYLAND")){
             //Prefer x11, as Wayland seems to be broken: https://github.com/Anuken/Mindustry/issues/11657
             if("wayland".equalsIgnoreCase(System.getenv("XDG_SESSION_TYPE"))){
