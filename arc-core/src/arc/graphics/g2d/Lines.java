@@ -15,6 +15,7 @@ public class Lines{
     private static FloatSeq floatBuilder = new FloatSeq(20);
     private static boolean building;
     private static float circlePrecision = 0.4f;
+    public static int MAX_CIRCLE_VERTICES = 100;
 
     /** Set the vertices used for drawing a line circle. */
     public static void setCirclePrecision(float amount){
@@ -22,7 +23,9 @@ public class Lines{
     }
 
     public static int circleVertices(float rad){
-        return 11 + (int)(rad * circlePrecision);
+        int ret = 11 + (int)(rad * circlePrecision);
+        //MDTX: cap at 100 vertices
+        return Math.min(ret, MAX_CIRCLE_VERTICES);
     }
 
     public static void lineAngle(float x, float y, float angle, float length, boolean cap){
