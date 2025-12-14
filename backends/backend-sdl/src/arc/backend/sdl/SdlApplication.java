@@ -112,6 +112,21 @@ public class SdlApplication implements Application{
 
         if(OS.isMac) restartMac();
 
+        //MDTX: Special handle for Loader
+        if(System.getProperty("MDTX-SDL-window") != null){
+            Log.info("[Core] Initialize reusing window and context.");
+            window = Long.parseLong(System.getProperty("MDTX-SDL-window"));
+            context = Long.parseLong(System.getProperty("MDTX-SDL-context"));
+
+            config.width = Integer.parseInt(System.getProperty("MDTX-SDL-width"));
+            config.height = Integer.parseInt(System.getProperty("MDTX-SDL-height"));
+
+            int[] ver = new int[3];
+            SDL_GetVersion(ver);
+            Log.info("[Core] Initialized SDL v@.@.@", ver[0], ver[1], ver[2]);
+            return;
+        }
+
         check(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS));
 
         //show native IME candidate UI
