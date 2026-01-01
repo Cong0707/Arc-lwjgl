@@ -46,6 +46,12 @@ public class Element{
     private boolean layoutEnabled = true;
     private Runnable update;
 
+    public Element(){
+        if(Core.app != null && !Core.app.isOnMainThread()){
+            Log.err(new RuntimeException("UI should be created in main Thread"));
+        }
+    }
+
     /** Draws the element. Does nothing by default. */
     public void draw(){
         validate();
