@@ -61,6 +61,7 @@ class Lwjgl3Window internal constructor(
                         windowListener!!.focusGained()
                     }
                 } else {
+                    input?.resetPollingStates()
                     if (windowListener != null) {
                         windowListener!!.focusLost()
                     }
@@ -86,6 +87,7 @@ class Lwjgl3Window internal constructor(
                 }
                 this@Lwjgl3Window.isIconified = iconified
                 if (iconified) {
+                    input?.resetPollingStates()
                     if (config.pauseWhenMinimized) {
                         synchronized(lifecycleListeners) {
                             for (lifecycleListener in lifecycleListeners) {
