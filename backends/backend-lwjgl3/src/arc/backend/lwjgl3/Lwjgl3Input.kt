@@ -185,10 +185,6 @@ class Lwjgl3Input(val window: Lwjgl3Window) : Disposable, Input() {
     fun update() {
         eventQueue.processor = inputMultiplexer
         eventQueue.drain()
-
-        for (device in devices) {
-            device.preUpdate()
-        }
     }
 
     fun prepareNext() {
@@ -204,10 +200,6 @@ class Lwjgl3Input(val window: Lwjgl3Window) : Disposable, Input() {
             for (i in 0..<justPressedKeys.asList().size) {
                 justPressedKeys.set(i ,false)
             }
-        }
-
-        for (device in devices) {
-            device.postUpdate()
         }
 
         deltaX = 0
