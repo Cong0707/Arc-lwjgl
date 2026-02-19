@@ -394,15 +394,6 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
         return
     }
 
-    override fun setResizable(resizable: Boolean) {
-        window.config.setResizable(resizable)
-        GLFW.glfwSetWindowAttrib(
-            window.windowHandle,
-            GLFW.GLFW_RESIZABLE,
-            if (resizable) GLFW.GLFW_TRUE else GLFW.GLFW_FALSE
-        )
-    }
-
     override fun setVSync(vsync: Boolean) {
         window.config.vSyncEnabled = vsync
         GLFW.glfwSwapInterval(if (vsync) 1 else 0)
