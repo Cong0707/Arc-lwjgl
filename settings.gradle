@@ -1,3 +1,8 @@
+pluginManagement {
+    plugins {
+        id 'org.jetbrains.kotlin.jvm' version '2.0.21'
+    }
+}
 include ":arc-core"
 
 include ":extensions"
@@ -20,6 +25,8 @@ include ":backends:backend-sdl"
 include ":backends:backend-sdl3"
 include ":backends:backend-robovm"
 
+include ":backends:backend-lwjgl3"
+
 include ":natives"
 include ":natives:natives-desktop"
 include ":natives:natives-android"
@@ -29,3 +36,6 @@ include ":natives:natives-freetype-ios"
 include ":natives:natives-filedialogs"
 
 rootProject.name = "arc"
+include 'backends:backend-lwjgl3'
+findProject(':backends:backend-lwjgl3')?.name = 'backend-lwjgl3'
+
