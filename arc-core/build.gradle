@@ -1,5 +1,11 @@
+plugins{
+    id "org.jetbrains.kotlin.jvm"
+}
+
 sourceSets.main.java.srcDirs = ["src"]
+sourceSets.main.kotlin.srcDirs = ["src"]
 sourceSets.test.java.srcDirs = ["test"]
+sourceSets.test.kotlin.srcDirs = ["test"]
 sourceSets.test.resources.srcDirs = ["test/resources"]
 
 configurations{
@@ -7,6 +13,7 @@ configurations{
 }
 
 dependencies{
+    implementation "org.jetbrains.kotlin:kotlin-stdlib"
     testImplementation libraries.junit
     testImplementation aproj(":natives:natives-desktop")
     testImplementation files("unsafe/unsafe.jar")
@@ -182,3 +189,10 @@ jnigenBuild.finalizedBy postJni
 getTasksByName("jnigen", true).each{
     it.dependsOn preJni
 }
+
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach{
+    kotlinOptions.jvmTarget = "1.8"
+}
+
+
+
