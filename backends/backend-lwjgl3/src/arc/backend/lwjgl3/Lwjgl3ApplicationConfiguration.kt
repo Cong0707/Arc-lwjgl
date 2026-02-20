@@ -52,6 +52,8 @@ open class Lwjgl3ApplicationConfiguration : Lwjgl3WindowConfiguration() {
     }
 
     var glEmulation: GLEmulation = GLEmulation.GL20
+    /** Enables the dedicated Vulkan backend path. */
+    var useVulkan: Boolean = false
     var gles30ContextMajorVersion: Int = 3
     var gles30ContextMinorVersion: Int = 2
 
@@ -87,6 +89,8 @@ open class Lwjgl3ApplicationConfiguration : Lwjgl3WindowConfiguration() {
         audioDeviceBufferSize = config.audioDeviceBufferSize
         audioDeviceBufferCount = config.audioDeviceBufferCount
         glEmulation = config.glEmulation
+        angleBackend = config.angleBackend
+        useVulkan = config.useVulkan
         gles30ContextMajorVersion = config.gles30ContextMajorVersion
         gles30ContextMinorVersion = config.gles30ContextMinorVersion
         r = config.r
@@ -147,6 +151,11 @@ open class Lwjgl3ApplicationConfiguration : Lwjgl3WindowConfiguration() {
         this.glEmulation = glVersion
         this.gles30ContextMajorVersion = gles3MajorVersion
         this.gles30ContextMinorVersion = gles3MinorVersion
+    }
+
+    /** Enables the Vulkan backend path while keeping GL API compatibility for existing rendering code. */
+    fun setVulkan(useVulkan: Boolean){
+        this.useVulkan = useVulkan
     }
 
     /** Sets the bit depth of the color, depth and stencil buffer as well as multi-sampling.

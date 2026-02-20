@@ -46,6 +46,18 @@ class Lwjgl3Application @JvmOverloads constructor(
 
     init {
         var config = config
+//        if (OS.hasProp("arc.vulkan") || OS.hasEnv("ARC_VULKAN")) {
+            config.useVulkan = true
+//        }
+
+        if(config.useVulkan){
+            // LWJGL stackSize unit is KB, not bytes.
+            // Raise to 8MB for Vulkan capability/bootstrap enumeration.
+            if(System.getProperty("org.lwjgl.system.stackSize") == null){
+                System.setProperty("org.lwjgl.system.stackSize", "8192")
+            }
+        }
+
         if (config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30) {
             // i test all of this and found metal is the best which can be loaded in 5000ms
             when (config.angleBackend) {
@@ -312,13 +324,15 @@ class Lwjgl3Application @JvmOverloads constructor(
         window.create(windowHandle)
         window.setVisible(config.initialVisible)
 
-        for (i in 0..1) {
-            Core.gl20.glClearColor(
-                config.initialBackgroundColor.r, config.initialBackgroundColor.g,
-                config.initialBackgroundColor.b, config.initialBackgroundColor.a
-            )
-            Core.gl20.glClear(GL11.GL_COLOR_BUFFER_BIT)
-            GLFW.glfwSwapBuffers(windowHandle)
+        if(!config.useVulkan){
+            for (i in 0..1) {
+                Core.gl20.glClearColor(
+                    config.initialBackgroundColor.r, config.initialBackgroundColor.g,
+                    config.initialBackgroundColor.b, config.initialBackgroundColor.a
+                )
+                Core.gl20.glClear(GL11.GL_COLOR_BUFFER_BIT)
+                GLFW.glfwSwapBuffers(windowHandle)
+            }
         }
 
         if (currentWindow != null) {
@@ -382,7 +396,9 @@ class Lwjgl3Application @JvmOverloads constructor(
             GLFW.glfwWindowHint(GLFW.GLFW_DEPTH_BITS, config.depth)
             GLFW.glfwWindowHint(GLFW.GLFW_SAMPLES, config.samples)
 
-            if (config.glEmulation == GLEmulation.GL30) {
+            if(config.useVulkan){
+                GLFW.glfwWindowHint(GLFW.GLFW_CLIENT_API, GLFW.GLFW_NO_API)
+            }else if (config.glEmulation == GLEmulation.GL30) {
                 GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MAJOR, config.gles30ContextMajorVersion)
                 GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MINOR, config.gles30ContextMinorVersion)
                 if (OS.isMac) {
@@ -392,20 +408,18 @@ class Lwjgl3Application @JvmOverloads constructor(
                     GLFW.glfwWindowHint(GLFW.GLFW_OPENGL_FORWARD_COMPAT, GLFW.GLFW_TRUE)
                     GLFW.glfwWindowHint(GLFW.GLFW_OPENGL_PROFILE, GLFW.GLFW_OPENGL_CORE_PROFILE)
                 }
-            } else {
-                if (config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30) {
-                    GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_CREATION_API, GLFW.GLFW_EGL_CONTEXT_API)
-                    GLFW.glfwWindowHint(GLFW.GLFW_CLIENT_API, GLFW.GLFW_OPENGL_ES_API)
-                    GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MAJOR, 2)
-                    GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MINOR, 0)
-                }
+            } else if (config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30) {
+                GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_CREATION_API, GLFW.GLFW_EGL_CONTEXT_API)
+                GLFW.glfwWindowHint(GLFW.GLFW_CLIENT_API, GLFW.GLFW_OPENGL_ES_API)
+                GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MAJOR, 2)
+                GLFW.glfwWindowHint(GLFW.GLFW_CONTEXT_VERSION_MINOR, 0)
             }
 
             if (config.transparentFramebuffer) {
                 GLFW.glfwWindowHint(GLFW.GLFW_TRANSPARENT_FRAMEBUFFER, GLFW.GLFW_TRUE)
             }
 
-            if (config.debug) {
+            if (config.debug && !config.useVulkan) {
                 GLFW.glfwWindowHint(GLFW.GLFW_OPENGL_DEBUG_CONTEXT, GLFW.GLFW_TRUE)
             }
 
@@ -415,7 +429,7 @@ class Lwjgl3Application @JvmOverloads constructor(
                 GLFW.glfwWindowHint(GLFW.GLFW_REFRESH_RATE, config.fullscreenMode!!.refreshRate)
                 windowHandle = GLFW.glfwCreateWindow(
                     config.fullscreenMode!!.width, config.fullscreenMode!!.height, config.title,
-                    config.fullscreenMode!!.monitor, sharedContextWindow
+                    config.fullscreenMode!!.monitor, if(config.useVulkan) 0 else sharedContextWindow
                 )
 
                 // On Ubuntu >= 22.04 with Nvidia GPU drivers and X11 display server there's a bug with EGL Context API
@@ -433,7 +447,7 @@ class Lwjgl3Application @JvmOverloads constructor(
                     if (config.windowDecorated) GLFW.GLFW_TRUE else GLFW.GLFW_FALSE
                 )
                 windowHandle =
-                    GLFW.glfwCreateWindow(config.windowWidth, config.windowHeight, config.title, 0, sharedContextWindow)
+                    GLFW.glfwCreateWindow(config.windowWidth, config.windowHeight, config.title, 0, if(config.useVulkan) 0 else sharedContextWindow)
 
                 // On Ubuntu >= 22.04 with Nvidia GPU drivers and X11 display server there's a bug with EGL Context API
                 // If the windows creation has failed for this reason try to create it again with the native context
@@ -487,38 +501,40 @@ class Lwjgl3Application @JvmOverloads constructor(
             if (config.windowIconPaths != null) {
                 Lwjgl3Window.setIcon(windowHandle, config.windowIconPaths!!.toArray(), config.windowIconFileType)
             }
-            GLFW.glfwMakeContextCurrent(windowHandle)
-            GLFW.glfwSwapInterval(if (config.vSyncEnabled) 1 else 0)
-            if (config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30) {
-                try {
-                    val gles = Class.forName("org.lwjgl.opengles.GLES")
-                    gles.getMethod("createCapabilities").invoke(gles)
-                } catch (e: Throwable) {
-                    throw ArcRuntimeException("Couldn't initialize GLES", e)
+            if(!config.useVulkan){
+                GLFW.glfwMakeContextCurrent(windowHandle)
+                GLFW.glfwSwapInterval(if (config.vSyncEnabled) 1 else 0)
+                if (config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30) {
+                    try {
+                        val gles = Class.forName("org.lwjgl.opengles.GLES")
+                        gles.getMethod("createCapabilities").invoke(gles)
+                    } catch (e: Throwable) {
+                        throw ArcRuntimeException("Couldn't initialize GLES", e)
+                    }
+                } else {
+                    GL.createCapabilities()
                 }
-            } else {
-                GL.createCapabilities()
-            }
 
-            initiateGL(config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30)
-            if (!glVersion!!.atLeast(2, 0)) throw ArcRuntimeException(
-                ("""
+                initiateGL(config.glEmulation == GLEmulation.ANGLE_GLES20 || config.glEmulation == GLEmulation.ANGLE_GLES30)
+                if (!glVersion!!.atLeast(2, 0)) throw ArcRuntimeException(
+                    ("""
     OpenGL 2.0 or higher with the FBO extension is required. OpenGL version: ${glVersion!!.debugVersionString}
     ${glVersion!!.debugVersionString}
     """.trimIndent())
-            )
+                )
 
-            if ((config.glEmulation != GLEmulation.ANGLE_GLES20 && config.glEmulation != GLEmulation.ANGLE_GLES30) && !supportsFBO()) {
-                throw ArcRuntimeException(
-                    ("""
+                if ((config.glEmulation != GLEmulation.ANGLE_GLES20 && config.glEmulation != GLEmulation.ANGLE_GLES30) && !supportsFBO()) {
+                    throw ArcRuntimeException(
+                        ("""
     OpenGL 2.0 or higher with the FBO extension is required. OpenGL version: ${glVersion!!.debugVersionString}, FBO extension: false
     ${glVersion!!.debugVersionString}
     """.trimIndent())
-                )
-            }
+                    )
+                }
 
-            if (config.debug) {
-                check(config.glEmulation != GLEmulation.ANGLE_GLES20 && config.glEmulation != GLEmulation.ANGLE_GLES30) { "ANGLE currently can't be used with with Lwjgl3ApplicationConfiguration#enableGLDebugOutput" }
+                if (config.debug) {
+                    check(config.glEmulation != GLEmulation.ANGLE_GLES20 && config.glEmulation != GLEmulation.ANGLE_GLES30) { "ANGLE currently can't be used with with Lwjgl3ApplicationConfiguration#enableGLDebugOutput" }
+                }
             }
 
             return windowHandle

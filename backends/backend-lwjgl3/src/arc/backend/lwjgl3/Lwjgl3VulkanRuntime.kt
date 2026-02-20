@@ -1,0 +1,2499 @@
+package arc.backend.lwjgl3
+
+import arc.graphics.GL20
+import arc.graphics.GL30
+import arc.util.ArcRuntimeException
+import arc.util.Log
+import org.lwjgl.glfw.GLFW
+import org.lwjgl.glfw.GLFWVulkan
+import org.lwjgl.system.MemoryStack
+import org.lwjgl.system.MemoryUtil
+import org.lwjgl.util.shaderc.Shaderc
+import org.lwjgl.vulkan.KHRSurface
+import org.lwjgl.vulkan.KHRSwapchain
+import org.lwjgl.vulkan.VK
+import org.lwjgl.vulkan.VK10
+import org.lwjgl.vulkan.VkApplicationInfo
+import org.lwjgl.vulkan.VkAttachmentDescription
+import org.lwjgl.vulkan.VkAttachmentReference
+import org.lwjgl.vulkan.VkBufferCreateInfo
+import org.lwjgl.vulkan.VkBufferImageCopy
+import org.lwjgl.vulkan.VkCommandBuffer
+import org.lwjgl.vulkan.VkCommandBufferAllocateInfo
+import org.lwjgl.vulkan.VkCommandBufferBeginInfo
+import org.lwjgl.vulkan.VkCommandPoolCreateInfo
+import org.lwjgl.vulkan.VkDescriptorImageInfo
+import org.lwjgl.vulkan.VkDescriptorPoolCreateInfo
+import org.lwjgl.vulkan.VkDescriptorPoolSize
+import org.lwjgl.vulkan.VkDescriptorSetAllocateInfo
+import org.lwjgl.vulkan.VkDescriptorSetLayoutBinding
+import org.lwjgl.vulkan.VkDescriptorSetLayoutCreateInfo
+import org.lwjgl.vulkan.VkDevice
+import org.lwjgl.vulkan.VkDeviceCreateInfo
+import org.lwjgl.vulkan.VkDeviceQueueCreateInfo
+import org.lwjgl.vulkan.VkExtensionProperties
+import org.lwjgl.vulkan.VkExtent2D
+import org.lwjgl.vulkan.VkFenceCreateInfo
+import org.lwjgl.vulkan.VkFramebufferCreateInfo
+import org.lwjgl.vulkan.VkGraphicsPipelineCreateInfo
+import org.lwjgl.vulkan.VkImageCreateInfo
+import org.lwjgl.vulkan.VkImageMemoryBarrier
+import org.lwjgl.vulkan.VkImageSubresourceRange
+import org.lwjgl.vulkan.VkImageViewCreateInfo
+import org.lwjgl.vulkan.VkInstance
+import org.lwjgl.vulkan.VkInstanceCreateInfo
+import org.lwjgl.vulkan.VkMemoryAllocateInfo
+import org.lwjgl.vulkan.VkMemoryRequirements
+import org.lwjgl.vulkan.VkOffset2D
+import org.lwjgl.vulkan.VkPipelineColorBlendAttachmentState
+import org.lwjgl.vulkan.VkPipelineColorBlendStateCreateInfo
+import org.lwjgl.vulkan.VkPipelineDynamicStateCreateInfo
+import org.lwjgl.vulkan.VkPipelineInputAssemblyStateCreateInfo
+import org.lwjgl.vulkan.VkPipelineLayoutCreateInfo
+import org.lwjgl.vulkan.VkPipelineMultisampleStateCreateInfo
+import org.lwjgl.vulkan.VkPipelineRasterizationStateCreateInfo
+import org.lwjgl.vulkan.VkPipelineShaderStageCreateInfo
+import org.lwjgl.vulkan.VkPipelineVertexInputStateCreateInfo
+import org.lwjgl.vulkan.VkPipelineViewportStateCreateInfo
+import org.lwjgl.vulkan.VkPhysicalDevice
+import org.lwjgl.vulkan.VkPhysicalDeviceFeatures
+import org.lwjgl.vulkan.VkPhysicalDeviceMemoryProperties
+import org.lwjgl.vulkan.VkPresentInfoKHR
+import org.lwjgl.vulkan.VkPushConstantRange
+import org.lwjgl.vulkan.VkQueue
+import org.lwjgl.vulkan.VkQueueFamilyProperties
+import org.lwjgl.vulkan.VkRect2D
+import org.lwjgl.vulkan.VkRenderPassBeginInfo
+import org.lwjgl.vulkan.VkRenderPassCreateInfo
+import org.lwjgl.vulkan.VkSamplerCreateInfo
+import org.lwjgl.vulkan.VkSemaphoreCreateInfo
+import org.lwjgl.vulkan.VkShaderModuleCreateInfo
+import org.lwjgl.vulkan.VkSubmitInfo
+import org.lwjgl.vulkan.VkSubpassDependency
+import org.lwjgl.vulkan.VkSubpassDescription
+import org.lwjgl.vulkan.VkSurfaceCapabilitiesKHR
+import org.lwjgl.vulkan.VkSurfaceFormatKHR
+import org.lwjgl.vulkan.VkSwapchainCreateInfoKHR
+import org.lwjgl.vulkan.VkVertexInputAttributeDescription
+import org.lwjgl.vulkan.VkVertexInputBindingDescription
+import org.lwjgl.vulkan.VkViewport
+import org.lwjgl.vulkan.VkWriteDescriptorSet
+import java.nio.ByteBuffer
+import java.nio.ShortBuffer
+import kotlin.math.max
+import kotlin.math.min
+
+internal class Lwjgl3VulkanRuntime private constructor(
+    val windowHandle: Long,
+    val instance: VkInstance,
+    val surface: Long,
+    val physicalDevice: VkPhysicalDevice,
+    val device: VkDevice,
+    val graphicsQueueFamily: Int,
+    val presentQueueFamily: Int,
+    val graphicsQueue: VkQueue,
+    val presentQueue: VkQueue
+){
+    private var swapchain: Long = VK10.VK_NULL_HANDLE
+    private var swapchainFormat: Int = VK10.VK_FORMAT_B8G8R8A8_UNORM
+    private var swapchainWidth: Int = 1
+    private var swapchainHeight: Int = 1
+
+    private var swapchainImages = LongArray(0)
+    private var swapchainImageViews = LongArray(0)
+    private var framebuffers = LongArray(0)
+
+    private var renderPass: Long = VK10.VK_NULL_HANDLE
+    private var offscreenRenderPass: Long = VK10.VK_NULL_HANDLE
+    private var commandPool: Long = VK10.VK_NULL_HANDLE
+    private var commandBuffers = emptyArray<VkCommandBuffer>()
+
+    private val imageAvailableSemaphores = LongArray(maxFramesInFlight)
+    private val renderFinishedSemaphores = LongArray(maxFramesInFlight)
+    private val inFlightFences = LongArray(maxFramesInFlight)
+
+    private var currentFrame = 0
+    private var currentImageIndex = -1
+    private var currentCommandBuffer: VkCommandBuffer? = null
+
+    private var clearR = 0f
+    private var clearG = 0f
+    private var clearB = 0f
+    private var clearA = 1f
+
+    private var traceFrameCounter = 0L
+    private var traceDrawCallsThisFrame = 0
+
+    private var spriteDescriptorSetLayout = VK10.VK_NULL_HANDLE
+    private var spritePipelineLayout = VK10.VK_NULL_HANDLE
+    private var spriteDescriptorPool = VK10.VK_NULL_HANDLE
+    private val spritePipelines = HashMap<SpritePipelineKey, Long>()
+
+    private var spriteVertexBuffer = VK10.VK_NULL_HANDLE
+    private var spriteVertexBufferMemory = VK10.VK_NULL_HANDLE
+    private var spriteVertexMappedPtr = 0L
+    private var spriteVertexMapped: ByteBuffer? = null
+    private var spriteVertexCursor = 0
+
+    private var spriteIndexBuffer = VK10.VK_NULL_HANDLE
+    private var spriteIndexBufferMemory = VK10.VK_NULL_HANDLE
+    private var spriteIndexMappedPtr = 0L
+    private var spriteIndexMapped: ByteBuffer? = null
+    private var spriteIndexCursor = 0
+
+    private val spriteTextures = HashMap<Int, SpriteTexture>()
+    private var textureStagingBuffer = VK10.VK_NULL_HANDLE
+    private var textureStagingMemory = VK10.VK_NULL_HANDLE
+    private var textureStagingMappedPtr = 0L
+    private var textureStagingMapped: ByteBuffer? = null
+    private var textureStagingCapacity = 0
+
+    private val framebufferAttachments = HashMap<Int, FramebufferAttachment>()
+    private val offscreenTargets = HashMap<Int, OffscreenTarget>()
+
+    private var currentFramebuffer = 0
+    private var activeFramebuffer = Int.MIN_VALUE
+    private var activeTargetWidth = 0
+    private var activeTargetHeight = 0
+
+    private var viewportX = 0
+    private var viewportY = 0
+    private var viewportWidth = 0
+    private var viewportHeight = 0
+    private var viewportSet = false
+
+    private var scissorX = 0
+    private var scissorY = 0
+    private var scissorWidth = 0
+    private var scissorHeight = 0
+    private var scissorSet = false
+    private var scissorEnabled = false
+
+    private data class SpriteTexture(
+        var width: Int,
+        var height: Int,
+        var image: Long,
+        var memory: Long,
+        var imageView: Long,
+        var sampler: Long,
+        var descriptorSet: Long,
+        var minFilter: Int,
+        var magFilter: Int,
+        var wrapS: Int,
+        var wrapT: Int
+    )
+
+    private data class FramebufferAttachment(
+        var textureId: Int,
+        var width: Int,
+        var height: Int
+    )
+
+    private data class OffscreenTarget(
+        var framebuffer: Long,
+        var textureId: Int,
+        var imageView: Long,
+        var width: Int,
+        var height: Int
+    )
+
+    private data class SpritePipelineKey(
+        val target: Int,
+        val blendEnabled: Boolean,
+        val srcColor: Int,
+        val dstColor: Int,
+        val srcAlpha: Int,
+        val dstAlpha: Int,
+        val colorOp: Int,
+        val alphaOp: Int
+    )
+
+    var frameActive = false
+        private set
+
+    init{
+        createSwapchainResources(VK10.VK_NULL_HANDLE)
+        createCommandResources()
+        createSyncResources()
+        createSpriteRendererResources()
+    }
+
+    fun setClearColor(r: Float, g: Float, b: Float, a: Float){
+        clearR = r
+        clearG = g
+        clearB = b
+        clearA = a
+    }
+
+    fun clear(mask: Int){
+        if(!frameActive) return
+        if((mask and GL20.GL_COLOR_BUFFER_BIT) == 0) return
+
+        if(!ensureRenderTargetBound()) return
+        val commandBuffer = currentCommandBuffer ?: return
+        MemoryStack.stackPush().use { stack ->
+            val clearAttachments = org.lwjgl.vulkan.VkClearAttachment.calloc(1, stack)
+            clearAttachments[0]
+                .aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
+                .colorAttachment(0)
+            clearAttachments[0].clearValue()
+                .color()
+                .float32(0, clearR)
+                .float32(1, clearG)
+                .float32(2, clearB)
+                .float32(3, clearA)
+
+            val clearRect = org.lwjgl.vulkan.VkClearRect.calloc(1, stack)
+            clearRect[0]
+                .baseArrayLayer(0)
+                .layerCount(1)
+            clearRect[0].rect()
+                .offset(VkOffset2D.calloc(stack).set(0, 0))
+                .extent(VkExtent2D.calloc(stack).set(activeTargetWidth, activeTargetHeight))
+
+            VK10.vkCmdClearAttachments(commandBuffer, clearAttachments, clearRect)
+        }
+    }
+
+    fun setCurrentFramebuffer(framebuffer: Int){
+        currentFramebuffer = framebuffer
+    }
+
+    fun setFramebufferColorAttachment(framebuffer: Int, textureId: Int, width: Int, height: Int){
+        if(framebuffer == 0) return
+
+        if(textureId == 0 || width <= 0 || height <= 0){
+            framebufferAttachments.remove(framebuffer)
+            destroyOffscreenTarget(framebuffer)
+            return
+        }
+
+        val attachment = framebufferAttachments.getOrPut(framebuffer){
+            FramebufferAttachment(textureId, width, height)
+        }
+        if(attachment.textureId != textureId || attachment.width != width || attachment.height != height){
+            attachment.textureId = textureId
+            attachment.width = width
+            attachment.height = height
+            destroyOffscreenTarget(framebuffer)
+        }
+    }
+
+    fun removeFramebuffer(framebuffer: Int){
+        framebufferAttachments.remove(framebuffer)
+        destroyOffscreenTarget(framebuffer)
+    }
+
+    fun setViewport(x: Int, y: Int, width: Int, height: Int){
+        viewportX = x
+        viewportY = y
+        viewportWidth = max(1, width)
+        viewportHeight = max(1, height)
+        viewportSet = true
+
+        val cmd = currentCommandBuffer ?: return
+        if(!frameActive || activeFramebuffer == Int.MIN_VALUE) return
+        applyViewport(cmd, activeTargetWidth, activeTargetHeight)
+    }
+
+    fun setScissor(x: Int, y: Int, width: Int, height: Int){
+        scissorX = x
+        scissorY = y
+        scissorWidth = max(1, width)
+        scissorHeight = max(1, height)
+        scissorSet = true
+
+        val cmd = currentCommandBuffer ?: return
+        if(!frameActive || activeFramebuffer == Int.MIN_VALUE) return
+        applyScissor(cmd, activeTargetWidth, activeTargetHeight)
+    }
+
+    fun setScissorEnabled(enabled: Boolean){
+        scissorEnabled = enabled
+
+        val cmd = currentCommandBuffer ?: return
+        if(!frameActive || activeFramebuffer == Int.MIN_VALUE) return
+        applyScissor(cmd, activeTargetWidth, activeTargetHeight)
+    }
+
+    fun uploadTexture(
+        glTextureId: Int,
+        width: Int,
+        height: Int,
+        rgbaPixels: ByteBuffer?,
+        minFilter: Int,
+        magFilter: Int,
+        wrapS: Int,
+        wrapT: Int
+    ){
+        if(glTextureId == 0 || width <= 0 || height <= 0) return
+        val hasPixels = rgbaPixels != null
+
+        waitIdle()
+
+        val existing = spriteTextures[glTextureId]
+        if(existing != null && existing.width == width && existing.height == height){
+            if(hasPixels){
+                uploadTexturePixels(
+                    image = existing.image,
+                    width = width,
+                    height = height,
+                    pixels = rgbaPixels!!,
+                    oldLayout = VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                )
+            }
+            if(existing.minFilter != minFilter
+                || existing.magFilter != magFilter
+                || existing.wrapS != wrapS
+                || existing.wrapT != wrapT){
+                updateTextureSampler(existing, minFilter, magFilter, wrapS, wrapT)
+            }
+            return
+        }
+
+        destroyOffscreenTargetsUsingTexture(glTextureId)
+        destroySpriteTexture(glTextureId)
+
+        MemoryStack.stackPush().use { stack ->
+            val imageInfo = VkImageCreateInfo.calloc(stack)
+            imageInfo.sType(VK10.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO)
+            imageInfo.imageType(VK10.VK_IMAGE_TYPE_2D)
+            imageInfo.format(VK10.VK_FORMAT_R8G8B8A8_UNORM)
+            imageInfo.extent()
+                .width(width)
+                .height(height)
+                .depth(1)
+            imageInfo.mipLevels(1)
+            imageInfo.arrayLayers(1)
+            imageInfo.samples(VK10.VK_SAMPLE_COUNT_1_BIT)
+            imageInfo.tiling(VK10.VK_IMAGE_TILING_OPTIMAL)
+            imageInfo.usage(
+                VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT or
+                    VK10.VK_IMAGE_USAGE_SAMPLED_BIT or
+                    VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+            )
+            imageInfo.sharingMode(VK10.VK_SHARING_MODE_EXCLUSIVE)
+            imageInfo.initialLayout(VK10.VK_IMAGE_LAYOUT_UNDEFINED)
+
+            val pImage = stack.mallocLong(1)
+            check(VK10.vkCreateImage(device, imageInfo, null, pImage), "Failed creating Vulkan texture image.")
+            val image = pImage[0]
+
+            val memReq = VkMemoryRequirements.calloc(stack)
+            VK10.vkGetImageMemoryRequirements(device, image, memReq)
+
+            val allocInfo = VkMemoryAllocateInfo.calloc(stack)
+            allocInfo.sType(VK10.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO)
+            allocInfo.allocationSize(memReq.size())
+            allocInfo.memoryTypeIndex(findMemoryType(memReq.memoryTypeBits(), VK10.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+
+            val pMemory = stack.mallocLong(1)
+            check(VK10.vkAllocateMemory(device, allocInfo, null, pMemory), "Failed allocating Vulkan texture image memory.")
+            val imageMemory = pMemory[0]
+            check(VK10.vkBindImageMemory(device, image, imageMemory, 0), "Failed binding Vulkan texture image memory.")
+
+            if(hasPixels){
+                uploadTexturePixels(
+                    image = image,
+                    width = width,
+                    height = height,
+                    pixels = rgbaPixels!!,
+                    oldLayout = VK10.VK_IMAGE_LAYOUT_UNDEFINED
+                )
+            }else{
+                transitionImageLayout(
+                    image,
+                    VK10.VK_IMAGE_LAYOUT_UNDEFINED,
+                    VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                )
+            }
+
+            val imageViewInfo = VkImageViewCreateInfo.calloc(stack)
+            imageViewInfo.sType(VK10.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO)
+            imageViewInfo.image(image)
+            imageViewInfo.viewType(VK10.VK_IMAGE_VIEW_TYPE_2D)
+            imageViewInfo.format(VK10.VK_FORMAT_R8G8B8A8_UNORM)
+            imageViewInfo.subresourceRange(
+                VkImageSubresourceRange.calloc(stack)
+                    .aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
+                    .baseMipLevel(0)
+                    .levelCount(1)
+                    .baseArrayLayer(0)
+                    .layerCount(1)
+            )
+
+            val pImageView = stack.mallocLong(1)
+            check(VK10.vkCreateImageView(device, imageViewInfo, null, pImageView), "Failed creating Vulkan texture image view.")
+            val imageView = pImageView[0]
+
+            val sampler = createTextureSampler(minFilter, magFilter, wrapS, wrapT)
+
+            val descriptorAlloc = VkDescriptorSetAllocateInfo.calloc(stack)
+            descriptorAlloc.sType(VK10.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO)
+            descriptorAlloc.descriptorPool(spriteDescriptorPool)
+            descriptorAlloc.pSetLayouts(stack.longs(spriteDescriptorSetLayout))
+
+            val pDescriptorSet = stack.mallocLong(1)
+            check(VK10.vkAllocateDescriptorSets(device, descriptorAlloc, pDescriptorSet), "Failed allocating Vulkan texture descriptor set.")
+            val descriptorSet = pDescriptorSet[0]
+
+            updateTextureDescriptorSet(descriptorSet, imageView, sampler)
+
+            spriteTextures[glTextureId] = SpriteTexture(
+                width = width,
+                height = height,
+                image = image,
+                memory = imageMemory,
+                imageView = imageView,
+                sampler = sampler,
+                descriptorSet = descriptorSet,
+                minFilter = minFilter,
+                magFilter = magFilter,
+                wrapS = wrapS,
+                wrapT = wrapT
+            )
+        }
+    }
+
+    fun uploadTextureSubImage(
+        glTextureId: Int,
+        xOffset: Int,
+        yOffset: Int,
+        width: Int,
+        height: Int,
+        rgbaPixels: ByteBuffer?,
+        minFilter: Int,
+        magFilter: Int,
+        wrapS: Int,
+        wrapT: Int
+    ){
+        if(glTextureId == 0 || width <= 0 || height <= 0) return
+
+        waitIdle()
+
+        val texture = spriteTextures[glTextureId] ?: return
+        if(xOffset < 0 || yOffset < 0
+            || xOffset + width > texture.width
+            || yOffset + height > texture.height){
+            return
+        }
+
+        if(texture.minFilter != minFilter
+            || texture.magFilter != magFilter
+            || texture.wrapS != wrapS
+            || texture.wrapT != wrapT){
+            updateTextureSampler(texture, minFilter, magFilter, wrapS, wrapT)
+        }
+
+        if(rgbaPixels == null) return
+        uploadTextureSubPixels(texture.image, xOffset, yOffset, width, height, rgbaPixels)
+    }
+
+    fun setTextureSampler(
+        glTextureId: Int,
+        minFilter: Int,
+        magFilter: Int,
+        wrapS: Int,
+        wrapT: Int
+    ){
+        if(glTextureId == 0) return
+        val texture = spriteTextures[glTextureId] ?: return
+        if(texture.minFilter == minFilter
+            && texture.magFilter == magFilter
+            && texture.wrapS == wrapS
+            && texture.wrapT == wrapT){
+            return
+        }
+
+        waitIdle()
+        updateTextureSampler(texture, minFilter, magFilter, wrapS, wrapT)
+    }
+
+    private fun uploadTexturePixels(image: Long, width: Int, height: Int, pixels: ByteBuffer, oldLayout: Int){
+        val byteCount = width * height * 4
+        val stagingBuffer = stageTexturePixels(pixels, byteCount)
+        if(stagingBuffer == VK10.VK_NULL_HANDLE) return
+        transitionImageLayout(image, oldLayout, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+        copyBufferToImage(stagingBuffer, image, 0, 0, width, height)
+        transitionImageLayout(image, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    }
+
+    private fun uploadTextureSubPixels(
+        image: Long,
+        xOffset: Int,
+        yOffset: Int,
+        width: Int,
+        height: Int,
+        pixels: ByteBuffer
+    ){
+        val byteCount = width * height * 4
+        val stagingBuffer = stageTexturePixels(pixels, byteCount)
+        if(stagingBuffer == VK10.VK_NULL_HANDLE) return
+
+        transitionImageLayout(image, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+        copyBufferToImage(stagingBuffer, image, xOffset, yOffset, width, height)
+        transitionImageLayout(image, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    }
+
+    private fun updateTextureSampler(texture: SpriteTexture, minFilter: Int, magFilter: Int, wrapS: Int, wrapT: Int){
+        val newSampler = createTextureSampler(minFilter, magFilter, wrapS, wrapT)
+        val oldSampler = texture.sampler
+        texture.sampler = newSampler
+        texture.minFilter = minFilter
+        texture.magFilter = magFilter
+        texture.wrapS = wrapS
+        texture.wrapT = wrapT
+        updateTextureDescriptorSet(texture.descriptorSet, texture.imageView, newSampler)
+
+        if(oldSampler != VK10.VK_NULL_HANDLE){
+            VK10.vkDestroySampler(device, oldSampler, null)
+        }
+    }
+
+    private fun createTextureSampler(minFilter: Int, magFilter: Int, wrapS: Int, wrapT: Int): Long{
+        MemoryStack.stackPush().use { stack ->
+            val samplerInfo = VkSamplerCreateInfo.calloc(stack)
+            samplerInfo.sType(VK10.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO)
+            samplerInfo.magFilter(mapMagFilter(magFilter))
+            samplerInfo.minFilter(mapMinFilter(minFilter))
+            samplerInfo.addressModeU(mapWrapMode(wrapS))
+            samplerInfo.addressModeV(mapWrapMode(wrapT))
+            samplerInfo.addressModeW(VK10.VK_SAMPLER_ADDRESS_MODE_REPEAT)
+            samplerInfo.anisotropyEnable(false)
+            samplerInfo.maxAnisotropy(1f)
+            samplerInfo.borderColor(VK10.VK_BORDER_COLOR_INT_OPAQUE_BLACK)
+            samplerInfo.unnormalizedCoordinates(false)
+            samplerInfo.compareEnable(false)
+            samplerInfo.mipmapMode(VK10.VK_SAMPLER_MIPMAP_MODE_NEAREST)
+            samplerInfo.mipLodBias(0f)
+            samplerInfo.minLod(0f)
+            samplerInfo.maxLod(0f)
+
+            val pSampler = stack.mallocLong(1)
+            check(VK10.vkCreateSampler(device, samplerInfo, null, pSampler), "Failed creating Vulkan texture sampler.")
+            return pSampler[0]
+        }
+    }
+
+    private fun mapMinFilter(glFilter: Int): Int{
+        return when(glFilter){
+            GL20.GL_LINEAR,
+            GL20.GL_LINEAR_MIPMAP_NEAREST,
+            GL20.GL_LINEAR_MIPMAP_LINEAR -> VK10.VK_FILTER_LINEAR
+            else -> VK10.VK_FILTER_NEAREST
+        }
+    }
+
+    private fun mapMagFilter(glFilter: Int): Int{
+        return if(glFilter == GL20.GL_LINEAR) VK10.VK_FILTER_LINEAR else VK10.VK_FILTER_NEAREST
+    }
+
+    private fun mapWrapMode(glWrap: Int): Int{
+        return when(glWrap){
+            GL20.GL_CLAMP_TO_EDGE -> VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
+            GL20.GL_MIRRORED_REPEAT -> VK10.VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT
+            else -> VK10.VK_SAMPLER_ADDRESS_MODE_REPEAT
+        }
+    }
+
+    private fun updateTextureDescriptorSet(descriptorSet: Long, imageView: Long, sampler: Long){
+        MemoryStack.stackPush().use { stack ->
+            val imageInfoDescriptor = VkDescriptorImageInfo.calloc(1, stack)
+            imageInfoDescriptor[0]
+                .imageLayout(VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                .imageView(imageView)
+                .sampler(sampler)
+
+            val write = VkWriteDescriptorSet.calloc(1, stack)
+            write[0].sType(VK10.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
+            write[0].dstSet(descriptorSet)
+            write[0].dstBinding(0)
+            write[0].descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+            write[0].descriptorCount(1)
+            write[0].pImageInfo(imageInfoDescriptor)
+            VK10.vkUpdateDescriptorSets(device, write, null)
+        }
+    }
+
+    fun destroyTexture(glTextureId: Int){
+        waitIdle()
+        destroyOffscreenTargetsUsingTexture(glTextureId)
+        destroySpriteTexture(glTextureId)
+    }
+
+    fun drawSprite(
+        vertices: ByteBuffer,
+        vertexCount: Int,
+        indices: ShortBuffer,
+        indexCount: Int,
+        textureId: Int,
+        projTrans: FloatArray,
+        blendEnabled: Boolean,
+        blendSrcColor: Int,
+        blendDstColor: Int,
+        blendSrcAlpha: Int,
+        blendDstAlpha: Int,
+        blendEqColor: Int,
+        blendEqAlpha: Int,
+        blendColorR: Float,
+        blendColorG: Float,
+        blendColorB: Float,
+        blendColorA: Float
+    ){
+        if(!frameActive || vertexCount <= 0 || indexCount <= 0) return
+        if(!ensureRenderTargetBound()) return
+        val cmd = currentCommandBuffer ?: return
+        val texture = spriteTextures[textureId] ?: return
+        val mappedVertex = spriteVertexMapped ?: return
+        val mappedIndex = spriteIndexMapped ?: return
+
+        val pipeline = getSpritePipeline(
+            activeFramebuffer == 0,
+            blendEnabled,
+            blendSrcColor,
+            blendDstColor,
+            blendSrcAlpha,
+            blendDstAlpha,
+            blendEqColor,
+            blendEqAlpha
+        )
+        if(pipeline == VK10.VK_NULL_HANDLE) return
+
+        val vertexBytes = vertices.remaining()
+        val indexBytes = indexCount * 2
+        if(spriteVertexCursor + vertexBytes > spriteVertexBufferSize || spriteIndexCursor + indexBytes > spriteIndexBufferSize){
+            return
+        }
+
+        val srcVerts = vertices.duplicate()
+        srcVerts.position(0)
+        mappedVertex.position(spriteVertexCursor)
+        mappedVertex.put(srcVerts)
+        val vertexOffset = spriteVertexCursor
+        spriteVertexCursor += align4(vertexBytes)
+
+        val dstIndices = mappedIndex.duplicate()
+        dstIndices.position(spriteIndexCursor)
+        dstIndices.limit(spriteIndexCursor + indexBytes)
+        val dstShort = dstIndices.slice().order(java.nio.ByteOrder.nativeOrder()).asShortBuffer()
+        val srcShort = indices.duplicate()
+        srcShort.position(0)
+        dstShort.put(srcShort)
+        val indexOffset = spriteIndexCursor
+        spriteIndexCursor += align4(indexBytes)
+
+        MemoryStack.stackPush().use { stack ->
+            VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline)
+            VK10.vkCmdBindVertexBuffers(cmd, 0, stack.longs(spriteVertexBuffer), stack.longs(vertexOffset.toLong()))
+            VK10.vkCmdBindIndexBuffer(cmd, spriteIndexBuffer, indexOffset.toLong(), VK10.VK_INDEX_TYPE_UINT16)
+            VK10.vkCmdBindDescriptorSets(
+                cmd,
+                VK10.VK_PIPELINE_BIND_POINT_GRAPHICS,
+                spritePipelineLayout,
+                0,
+                stack.longs(texture.descriptorSet),
+                null
+            )
+            VK10.vkCmdSetBlendConstants(cmd, stack.floats(blendColorR, blendColorG, blendColorB, blendColorA))
+
+            val pushBytes = stack.malloc(64)
+            val pushFloats = pushBytes.asFloatBuffer()
+            for(i in 0 until 16){
+                pushFloats.put(i, projTrans[i])
+            }
+            VK10.vkCmdPushConstants(cmd, spritePipelineLayout, VK10.VK_SHADER_STAGE_VERTEX_BIT, 0, pushBytes)
+
+            VK10.vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0)
+        }
+
+        if(traceEnabled){
+            traceDrawCallsThisFrame++
+        }
+    }
+
+    private fun getSpritePipeline(
+        swapchainTarget: Boolean,
+        blendEnabled: Boolean,
+        blendSrcColor: Int,
+        blendDstColor: Int,
+        blendSrcAlpha: Int,
+        blendDstAlpha: Int,
+        blendEqColor: Int,
+        blendEqAlpha: Int
+    ): Long{
+        val renderTarget = if(swapchainTarget) targetSwapchain else targetOffscreen
+        val key = SpritePipelineKey(
+            target = renderTarget,
+            blendEnabled = blendEnabled,
+            srcColor = blendSrcColor,
+            dstColor = blendDstColor,
+            srcAlpha = blendSrcAlpha,
+            dstAlpha = blendDstAlpha,
+            colorOp = blendEqColor,
+            alphaOp = blendEqAlpha
+        )
+        spritePipelines[key]?.let{ return it }
+
+        val renderPass = if(swapchainTarget) renderPass else offscreenRenderPass
+        if(renderPass == VK10.VK_NULL_HANDLE) return VK10.VK_NULL_HANDLE
+
+        val pipeline = createSpritePipeline(renderPass, "target=$renderTarget", key)
+        spritePipelines[key] = pipeline
+        return pipeline
+    }
+
+    private fun ensureRenderTargetBound(): Boolean{
+        if(!frameActive) return false
+        val cmd = currentCommandBuffer ?: return false
+
+        if(activeFramebuffer == currentFramebuffer){
+            return true
+        }
+
+        endActiveRenderPass(cmd)
+
+        if(currentFramebuffer == 0){
+            beginRenderPass(
+                commandBuffer = cmd,
+                targetRenderPass = renderPass,
+                framebuffer = framebuffers.getOrNull(currentImageIndex) ?: return false,
+                width = swapchainWidth,
+                height = swapchainHeight
+            )
+            activeFramebuffer = 0
+            activeTargetWidth = swapchainWidth
+            activeTargetHeight = swapchainHeight
+            return true
+        }
+
+        val attachment = framebufferAttachments[currentFramebuffer] ?: return false
+        val target = ensureOffscreenTarget(currentFramebuffer, attachment) ?: return false
+
+        beginRenderPass(
+            commandBuffer = cmd,
+            targetRenderPass = offscreenRenderPass,
+            framebuffer = target.framebuffer,
+            width = target.width,
+            height = target.height
+        )
+        activeFramebuffer = currentFramebuffer
+        activeTargetWidth = target.width
+        activeTargetHeight = target.height
+        return true
+    }
+
+    private fun beginRenderPass(commandBuffer: VkCommandBuffer, targetRenderPass: Long, framebuffer: Long, width: Int, height: Int){
+        MemoryStack.stackPush().use { stack ->
+            val clearValues = org.lwjgl.vulkan.VkClearValue.calloc(1, stack)
+            clearValues[0].color()
+                .float32(0, clearR)
+                .float32(1, clearG)
+                .float32(2, clearB)
+                .float32(3, clearA)
+
+            val renderArea = VkRect2D.calloc(stack)
+            renderArea.offset(VkOffset2D.calloc(stack).set(0, 0))
+            renderArea.extent(VkExtent2D.calloc(stack).set(width, height))
+
+            val renderPassInfo = VkRenderPassBeginInfo.calloc(stack)
+            renderPassInfo.sType(VK10.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO)
+            renderPassInfo.renderPass(targetRenderPass)
+            renderPassInfo.framebuffer(framebuffer)
+            renderPassInfo.renderArea(renderArea)
+            renderPassInfo.pClearValues(clearValues)
+
+            VK10.vkCmdBeginRenderPass(commandBuffer, renderPassInfo, VK10.VK_SUBPASS_CONTENTS_INLINE)
+            applyViewport(commandBuffer, width, height)
+            applyScissor(commandBuffer, width, height)
+        }
+    }
+
+    private fun endActiveRenderPass(commandBuffer: VkCommandBuffer){
+        if(activeFramebuffer == Int.MIN_VALUE) return
+        VK10.vkCmdEndRenderPass(commandBuffer)
+        activeFramebuffer = Int.MIN_VALUE
+        activeTargetWidth = 0
+        activeTargetHeight = 0
+    }
+
+    private fun applyViewport(commandBuffer: VkCommandBuffer, targetWidth: Int, targetHeight: Int){
+        val width = max(1, targetWidth)
+        val height = max(1, targetHeight)
+        val vx = if(viewportSet) viewportX else 0
+        val vy = if(viewportSet) viewportY else 0
+        val vw = if(viewportSet) viewportWidth else width
+        val vh = if(viewportSet) viewportHeight else height
+
+        val clampedWidth = max(1, min(vw, width))
+        val clampedHeight = max(1, min(vh, height))
+        val glY = vy.coerceIn(0, height - 1)
+        val vkY = (height - (glY + clampedHeight)).coerceAtLeast(0)
+
+        MemoryStack.stackPush().use { stack ->
+            val viewport = VkViewport.calloc(1, stack)
+            viewport[0]
+                .x(vx.toFloat())
+                .y(vkY.toFloat())
+                .width(clampedWidth.toFloat())
+                .height(clampedHeight.toFloat())
+                .minDepth(0f)
+                .maxDepth(1f)
+            VK10.vkCmdSetViewport(commandBuffer, 0, viewport)
+        }
+    }
+
+    private fun applyScissor(commandBuffer: VkCommandBuffer, targetWidth: Int, targetHeight: Int){
+        val width = max(1, targetWidth)
+        val height = max(1, targetHeight)
+
+        val rectX: Int
+        val rectY: Int
+        val rectW: Int
+        val rectH: Int
+
+        if(scissorEnabled){
+            val sx = if(scissorSet) scissorX else 0
+            val sy = if(scissorSet) scissorY else 0
+            val sw = if(scissorSet) scissorWidth else width
+            val sh = if(scissorSet) scissorHeight else height
+
+            rectX = sx.coerceIn(0, width - 1)
+            rectW = max(1, min(sw, width - rectX))
+
+            val clampedHeight = max(1, min(sh, height))
+            val glY = sy.coerceIn(0, height - 1)
+            rectY = (height - (glY + clampedHeight)).coerceAtLeast(0)
+            rectH = clampedHeight
+        }else{
+            rectX = 0
+            rectY = 0
+            rectW = width
+            rectH = height
+        }
+
+        MemoryStack.stackPush().use { stack ->
+            val scissor = VkRect2D.calloc(1, stack)
+            scissor[0]
+                .offset(VkOffset2D.calloc(stack).set(rectX, rectY))
+                .extent(VkExtent2D.calloc(stack).set(rectW, rectH))
+            VK10.vkCmdSetScissor(commandBuffer, 0, scissor)
+        }
+    }
+
+    private fun ensureOffscreenTarget(framebufferId: Int, attachment: FramebufferAttachment): OffscreenTarget?{
+        val texture = spriteTextures[attachment.textureId] ?: return null
+        val existing = offscreenTargets[framebufferId]
+        if(existing != null
+            && existing.textureId == attachment.textureId
+            && existing.imageView == texture.imageView
+            && existing.width == attachment.width
+            && existing.height == attachment.height){
+            return existing
+        }
+
+        destroyOffscreenTarget(framebufferId)
+        if(offscreenRenderPass == VK10.VK_NULL_HANDLE) return null
+
+        MemoryStack.stackPush().use { stack ->
+            val framebufferInfo = VkFramebufferCreateInfo.calloc(stack)
+            framebufferInfo.sType(VK10.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO)
+            framebufferInfo.renderPass(offscreenRenderPass)
+            framebufferInfo.width(attachment.width)
+            framebufferInfo.height(attachment.height)
+            framebufferInfo.layers(1)
+            framebufferInfo.pAttachments(stack.longs(texture.imageView))
+
+            val pFramebuffer = stack.mallocLong(1)
+            check(VK10.vkCreateFramebuffer(device, framebufferInfo, null, pFramebuffer), "Failed creating Vulkan offscreen framebuffer.")
+
+            val target = OffscreenTarget(
+                framebuffer = pFramebuffer[0],
+                textureId = attachment.textureId,
+                imageView = texture.imageView,
+                width = attachment.width,
+                height = attachment.height
+            )
+            offscreenTargets[framebufferId] = target
+            return target
+        }
+    }
+
+    private fun destroyOffscreenTarget(framebufferId: Int){
+        val target = offscreenTargets.remove(framebufferId) ?: return
+        if(target.framebuffer != VK10.VK_NULL_HANDLE){
+            VK10.vkDestroyFramebuffer(device, target.framebuffer, null)
+        }
+    }
+
+    private fun destroyOffscreenTargetsUsingTexture(textureId: Int){
+        val toRemove = offscreenTargets.entries
+            .filter { it.value.textureId == textureId }
+            .map { it.key }
+        for(framebufferId in toRemove){
+            destroyOffscreenTarget(framebufferId)
+        }
+    }
+
+    fun beginFrame(){
+        if(frameActive) return
+        if(!ensureSwapchainUpToDate()) return
+
+        MemoryStack.stackPush().use { stack ->
+            val waitFence = inFlightFences[currentFrame]
+            check(VK10.vkWaitForFences(device, waitFence, true, Long.MAX_VALUE), "Failed waiting for Vulkan frame fence.")
+
+            val pImageIndex = stack.mallocInt(1)
+            val acquireResult = KHRSwapchain.vkAcquireNextImageKHR(
+                device,
+                swapchain,
+                Long.MAX_VALUE,
+                imageAvailableSemaphores[currentFrame],
+                VK10.VK_NULL_HANDLE,
+                pImageIndex
+            )
+
+            if(acquireResult == KHRSwapchain.VK_ERROR_OUT_OF_DATE_KHR){
+                recreateSwapchain()
+                return
+            }
+            checkAcquire(acquireResult)
+
+            currentImageIndex = pImageIndex[0]
+            val commandBuffer = commandBuffers[currentImageIndex]
+            currentCommandBuffer = commandBuffer
+
+            check(VK10.vkResetFences(device, waitFence), "Failed resetting Vulkan frame fence.")
+            check(VK10.vkResetCommandBuffer(commandBuffer, 0), "Failed resetting Vulkan command buffer.")
+
+            val beginInfo = VkCommandBufferBeginInfo.calloc(stack)
+            beginInfo.sType(VK10.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
+            check(VK10.vkBeginCommandBuffer(commandBuffer, beginInfo), "Failed beginning Vulkan command buffer.")
+
+            spriteVertexCursor = 0
+            spriteIndexCursor = 0
+            traceDrawCallsThisFrame = 0
+            activeFramebuffer = Int.MIN_VALUE
+            activeTargetWidth = 0
+            activeTargetHeight = 0
+            currentFramebuffer = 0
+            frameActive = true
+        }
+    }
+
+    fun endFrame(){
+        if(!frameActive) return
+        val commandBuffer = currentCommandBuffer ?: return
+
+        MemoryStack.stackPush().use { stack ->
+            endActiveRenderPass(commandBuffer)
+            check(VK10.vkEndCommandBuffer(commandBuffer), "Failed ending Vulkan command buffer.")
+
+            val pWaitSemaphores = stack.longs(imageAvailableSemaphores[currentFrame])
+            val pSignalSemaphores = stack.longs(renderFinishedSemaphores[currentFrame])
+            val pWaitStages = stack.ints(VK10.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+            val pCommandBuffers = stack.pointers(commandBuffer.address())
+
+            val submitInfo = VkSubmitInfo.calloc(1, stack)
+            submitInfo[0].sType(VK10.VK_STRUCTURE_TYPE_SUBMIT_INFO)
+            submitInfo[0].pWaitSemaphores(pWaitSemaphores)
+            submitInfo[0].pWaitDstStageMask(pWaitStages)
+            submitInfo[0].pCommandBuffers(pCommandBuffers)
+            submitInfo[0].pSignalSemaphores(pSignalSemaphores)
+
+            check(
+                VK10.vkQueueSubmit(graphicsQueue, submitInfo[0], inFlightFences[currentFrame]),
+                "Failed submitting Vulkan graphics queue."
+            )
+
+            val presentInfo = VkPresentInfoKHR.calloc(stack)
+            presentInfo.sType(KHRSwapchain.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR)
+            presentInfo.pWaitSemaphores(pSignalSemaphores)
+            presentInfo.swapchainCount(1)
+            presentInfo.pSwapchains(stack.longs(swapchain))
+            presentInfo.pImageIndices(stack.ints(currentImageIndex))
+
+            val presentResult = KHRSwapchain.vkQueuePresentKHR(presentQueue, presentInfo)
+            if(presentResult == KHRSwapchain.VK_ERROR_OUT_OF_DATE_KHR || presentResult == KHRSwapchain.VK_SUBOPTIMAL_KHR){
+                recreateSwapchain()
+            }else{
+                check(presentResult, "Failed presenting Vulkan swapchain image.")
+            }
+        }
+
+        currentFrame = (currentFrame + 1) % maxFramesInFlight
+        currentImageIndex = -1
+        currentCommandBuffer = null
+        activeFramebuffer = Int.MIN_VALUE
+        activeTargetWidth = 0
+        activeTargetHeight = 0
+        frameActive = false
+
+        if(traceEnabled){
+            traceFrameCounter++
+            if(traceFrameCounter % 60L == 0L){
+                Log.info("Vulkan frame @ drawCalls=@ swap=@x@", traceFrameCounter, traceDrawCallsThisFrame, swapchainWidth, swapchainHeight)
+            }
+        }
+    }
+
+    fun waitIdle(){
+        VK10.vkDeviceWaitIdle(device)
+    }
+
+    fun dispose(){
+        waitIdle()
+
+        for(i in 0 until maxFramesInFlight){
+            if(imageAvailableSemaphores[i] != VK10.VK_NULL_HANDLE){
+                VK10.vkDestroySemaphore(device, imageAvailableSemaphores[i], null)
+            }
+            if(renderFinishedSemaphores[i] != VK10.VK_NULL_HANDLE){
+                VK10.vkDestroySemaphore(device, renderFinishedSemaphores[i], null)
+            }
+            if(inFlightFences[i] != VK10.VK_NULL_HANDLE){
+                VK10.vkDestroyFence(device, inFlightFences[i], null)
+            }
+        }
+
+        destroySpriteRendererResources()
+        destroySwapchainResources()
+        destroyOffscreenRenderPass()
+
+        if(commandPool != VK10.VK_NULL_HANDLE){
+            VK10.vkDestroyCommandPool(device, commandPool, null)
+            commandPool = VK10.VK_NULL_HANDLE
+        }
+
+        VK10.vkDestroyDevice(device, null)
+        KHRSurface.vkDestroySurfaceKHR(instance, surface, null)
+        VK10.vkDestroyInstance(instance, null)
+    }
+
+    private data class HostVisibleBuffer(
+        val buffer: Long,
+        val memory: Long,
+        val mappedPtr: Long,
+        val mapped: ByteBuffer
+    )
+
+    private fun createSpriteRendererResources(){
+        createSpriteDescriptorResources()
+        createOffscreenRenderPass()
+        createSpriteBuffers()
+        createSpritePipelines()
+    }
+
+    private fun destroySpriteRendererResources(){
+        for(framebuffer in offscreenTargets.keys.toList()){
+            destroyOffscreenTarget(framebuffer)
+        }
+        framebufferAttachments.clear()
+        for(textureId in spriteTextures.keys.toList()){
+            destroySpriteTexture(textureId)
+        }
+        destroySpritePipelines()
+        destroySpriteBuffers()
+        destroyTextureStagingBuffer()
+        destroyOffscreenRenderPass()
+        destroySpriteDescriptorResources()
+    }
+
+    private fun createSpriteDescriptorResources(){
+        MemoryStack.stackPush().use { stack ->
+            val layoutBinding = VkDescriptorSetLayoutBinding.calloc(1, stack)
+            layoutBinding[0]
+                .binding(0)
+                .descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                .descriptorCount(1)
+                .stageFlags(VK10.VK_SHADER_STAGE_FRAGMENT_BIT)
+
+            val layoutInfo = VkDescriptorSetLayoutCreateInfo.calloc(stack)
+            layoutInfo.sType(VK10.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO)
+            layoutInfo.pBindings(layoutBinding)
+
+            val pLayout = stack.mallocLong(1)
+            check(VK10.vkCreateDescriptorSetLayout(device, layoutInfo, null, pLayout), "Failed creating Vulkan sprite descriptor set layout.")
+            spriteDescriptorSetLayout = pLayout[0]
+
+            val poolSize = VkDescriptorPoolSize.calloc(1, stack)
+            poolSize[0]
+                .type(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                .descriptorCount(maxSpriteTextures)
+
+            val poolInfo = VkDescriptorPoolCreateInfo.calloc(stack)
+            poolInfo.sType(VK10.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO)
+            poolInfo.flags(VK10.VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT)
+            poolInfo.maxSets(maxSpriteTextures)
+            poolInfo.pPoolSizes(poolSize)
+
+            val pPool = stack.mallocLong(1)
+            check(VK10.vkCreateDescriptorPool(device, poolInfo, null, pPool), "Failed creating Vulkan sprite descriptor pool.")
+            spriteDescriptorPool = pPool[0]
+
+            val pushConstant = VkPushConstantRange.calloc(1, stack)
+            pushConstant[0]
+                .stageFlags(VK10.VK_SHADER_STAGE_VERTEX_BIT)
+                .offset(0)
+                .size(64)
+
+            val pipelineLayoutInfo = VkPipelineLayoutCreateInfo.calloc(stack)
+            pipelineLayoutInfo.sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO)
+            pipelineLayoutInfo.pSetLayouts(stack.longs(spriteDescriptorSetLayout))
+            pipelineLayoutInfo.pPushConstantRanges(pushConstant)
+
+            val pPipelineLayout = stack.mallocLong(1)
+            check(VK10.vkCreatePipelineLayout(device, pipelineLayoutInfo, null, pPipelineLayout), "Failed creating Vulkan sprite pipeline layout.")
+            spritePipelineLayout = pPipelineLayout[0]
+        }
+    }
+
+    private fun destroySpriteDescriptorResources(){
+        if(spritePipelineLayout != VK10.VK_NULL_HANDLE){
+            VK10.vkDestroyPipelineLayout(device, spritePipelineLayout, null)
+            spritePipelineLayout = VK10.VK_NULL_HANDLE
+        }
+
+        if(spriteDescriptorPool != VK10.VK_NULL_HANDLE){
+            VK10.vkDestroyDescriptorPool(device, spriteDescriptorPool, null)
+            spriteDescriptorPool = VK10.VK_NULL_HANDLE
+        }
+
+        if(spriteDescriptorSetLayout != VK10.VK_NULL_HANDLE){
+            VK10.vkDestroyDescriptorSetLayout(device, spriteDescriptorSetLayout, null)
+            spriteDescriptorSetLayout = VK10.VK_NULL_HANDLE
+        }
+    }
+
+    private fun createOffscreenRenderPass(){
+        if(offscreenRenderPass != VK10.VK_NULL_HANDLE) return
+
+        MemoryStack.stackPush().use { stack ->
+            val colorAttachment = VkAttachmentDescription.calloc(1, stack)
+            colorAttachment[0]
+                .format(VK10.VK_FORMAT_R8G8B8A8_UNORM)
+                .samples(VK10.VK_SAMPLE_COUNT_1_BIT)
+                .loadOp(VK10.VK_ATTACHMENT_LOAD_OP_LOAD)
+                .storeOp(VK10.VK_ATTACHMENT_STORE_OP_STORE)
+                .stencilLoadOp(VK10.VK_ATTACHMENT_LOAD_OP_DONT_CARE)
+                .stencilStoreOp(VK10.VK_ATTACHMENT_STORE_OP_DONT_CARE)
+                .initialLayout(VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                .finalLayout(VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+
+            val colorAttachmentRef = VkAttachmentReference.calloc(1, stack)
+            colorAttachmentRef[0]
+                .attachment(0)
+                .layout(VK10.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+
+            val subpass = VkSubpassDescription.calloc(1, stack)
+            subpass[0]
+                .pipelineBindPoint(VK10.VK_PIPELINE_BIND_POINT_GRAPHICS)
+                .colorAttachmentCount(1)
+                .pColorAttachments(colorAttachmentRef)
+
+            val dependencies = VkSubpassDependency.calloc(2, stack)
+            dependencies[0]
+                .srcSubpass(VK10.VK_SUBPASS_EXTERNAL)
+                .dstSubpass(0)
+                .srcStageMask(VK10.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT or VK10.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+                .dstStageMask(VK10.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+                .srcAccessMask(VK10.VK_ACCESS_SHADER_READ_BIT or VK10.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
+                .dstAccessMask(VK10.VK_ACCESS_COLOR_ATTACHMENT_READ_BIT or VK10.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
+            dependencies[1]
+                .srcSubpass(0)
+                .dstSubpass(VK10.VK_SUBPASS_EXTERNAL)
+                .srcStageMask(VK10.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+                .dstStageMask(VK10.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+                .srcAccessMask(VK10.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
+                .dstAccessMask(VK10.VK_ACCESS_SHADER_READ_BIT)
+
+            val renderPassInfo = VkRenderPassCreateInfo.calloc(stack)
+            renderPassInfo.sType(VK10.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO)
+            renderPassInfo.pAttachments(colorAttachment)
+            renderPassInfo.pSubpasses(subpass)
+            renderPassInfo.pDependencies(dependencies)
+
+            val pRenderPass = stack.mallocLong(1)
+            check(VK10.vkCreateRenderPass(device, renderPassInfo, null, pRenderPass), "Failed creating Vulkan offscreen render pass.")
+            offscreenRenderPass = pRenderPass[0]
+        }
+    }
+
+    private fun destroyOffscreenRenderPass(){
+        for(framebufferId in offscreenTargets.keys.toList()){
+            destroyOffscreenTarget(framebufferId)
+        }
+        if(offscreenRenderPass != VK10.VK_NULL_HANDLE){
+            VK10.vkDestroyRenderPass(device, offscreenRenderPass, null)
+            offscreenRenderPass = VK10.VK_NULL_HANDLE
+        }
+    }
+
+    private fun createSpriteBuffers(){
+        val vertexBuffer = createHostVisibleBuffer(spriteVertexBufferSize, VK10.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
+        spriteVertexBuffer = vertexBuffer.buffer
+        spriteVertexBufferMemory = vertexBuffer.memory
+        spriteVertexMappedPtr = vertexBuffer.mappedPtr
+        spriteVertexMapped = vertexBuffer.mapped
+
+        val indexBuffer = createHostVisibleBuffer(spriteIndexBufferSize, VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
+        spriteIndexBuffer = indexBuffer.buffer
+        spriteIndexBufferMemory = indexBuffer.memory
+        spriteIndexMappedPtr = indexBuffer.mappedPtr
+        spriteIndexMapped = indexBuffer.mapped
+    }
+
+    private fun destroySpriteBuffers(){
+        if(spriteVertexMappedPtr != 0L){
+            VK10.vkUnmapMemory(device, spriteVertexBufferMemory)
+            spriteVertexMappedPtr = 0L
+            spriteVertexMapped = null
+        }
+        if(spriteVertexBuffer != VK10.VK_NULL_HANDLE){
+            VK10.vkDestroyBuffer(device, spriteVertexBuffer, null)
+            spriteVertexBuffer = VK10.VK_NULL_HANDLE
+        }
+        if(spriteVertexBufferMemory != VK10.VK_NULL_HANDLE){
+            VK10.vkFreeMemory(device, spriteVertexBufferMemory, null)
+            spriteVertexBufferMemory = VK10.VK_NULL_HANDLE
+        }
+
+        if(spriteIndexMappedPtr != 0L){
+            VK10.vkUnmapMemory(device, spriteIndexBufferMemory)
+            spriteIndexMappedPtr = 0L
+            spriteIndexMapped = null
+        }
+        if(spriteIndexBuffer != VK10.VK_NULL_HANDLE){
+            VK10.vkDestroyBuffer(device, spriteIndexBuffer, null)
+            spriteIndexBuffer = VK10.VK_NULL_HANDLE
+        }
+        if(spriteIndexBufferMemory != VK10.VK_NULL_HANDLE){
+            VK10.vkFreeMemory(device, spriteIndexBufferMemory, null)
+            spriteIndexBufferMemory = VK10.VK_NULL_HANDLE
+        }
+    }
+
+    private fun createSpritePipelines(){
+        if(renderPass != VK10.VK_NULL_HANDLE){
+            getSpritePipeline(
+                swapchainTarget = true,
+                blendEnabled = true,
+                blendSrcColor = GL20.GL_SRC_ALPHA,
+                blendDstColor = GL20.GL_ONE_MINUS_SRC_ALPHA,
+                blendSrcAlpha = GL20.GL_ONE,
+                blendDstAlpha = GL20.GL_ONE_MINUS_SRC_ALPHA,
+                blendEqColor = GL20.GL_FUNC_ADD,
+                blendEqAlpha = GL20.GL_FUNC_ADD
+            )
+        }
+        if(offscreenRenderPass != VK10.VK_NULL_HANDLE){
+            getSpritePipeline(
+                swapchainTarget = false,
+                blendEnabled = true,
+                blendSrcColor = GL20.GL_SRC_ALPHA,
+                blendDstColor = GL20.GL_ONE_MINUS_SRC_ALPHA,
+                blendSrcAlpha = GL20.GL_ONE,
+                blendDstAlpha = GL20.GL_ONE_MINUS_SRC_ALPHA,
+                blendEqColor = GL20.GL_FUNC_ADD,
+                blendEqAlpha = GL20.GL_FUNC_ADD
+            )
+        }
+    }
+
+    private fun destroySpritePipelines(){
+        for(pipeline in spritePipelines.values){
+            if(pipeline != VK10.VK_NULL_HANDLE){
+                VK10.vkDestroyPipeline(device, pipeline, null)
+            }
+        }
+        spritePipelines.clear()
+    }
+
+    private fun createSpritePipeline(targetRenderPass: Long, label: String, blend: SpritePipelineKey): Long{
+        MemoryStack.stackPush().use { stack ->
+            val vertShaderModule = createShaderModule(
+                stack,
+                compileShader(
+                    spriteVertexShaderSource,
+                    Shaderc.shaderc_vertex_shader,
+                    "sprite-$label.vert"
+                )
+            )
+            val fragShaderModule = createShaderModule(
+                stack,
+                compileShader(
+                    spriteFragmentShaderSource,
+                    Shaderc.shaderc_fragment_shader,
+                    "sprite-$label.frag"
+                )
+            )
+
+            val mainName = stack.UTF8("main")
+            val shaderStages = VkPipelineShaderStageCreateInfo.calloc(2, stack)
+            shaderStages[0]
+                .sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO)
+                .stage(VK10.VK_SHADER_STAGE_VERTEX_BIT)
+                .module(vertShaderModule)
+                .pName(mainName)
+            shaderStages[1]
+                .sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO)
+                .stage(VK10.VK_SHADER_STAGE_FRAGMENT_BIT)
+                .module(fragShaderModule)
+                .pName(mainName)
+
+            val bindingDescriptions = VkVertexInputBindingDescription.calloc(1, stack)
+            bindingDescriptions[0]
+                .binding(0)
+                .stride(spriteVertexStride)
+                .inputRate(VK10.VK_VERTEX_INPUT_RATE_VERTEX)
+
+            val attributeDescriptions = VkVertexInputAttributeDescription.calloc(4, stack)
+            attributeDescriptions[0]
+                .binding(0)
+                .location(0)
+                .format(VK10.VK_FORMAT_R32G32_SFLOAT)
+                .offset(0)
+            attributeDescriptions[1]
+                .binding(0)
+                .location(1)
+                .format(VK10.VK_FORMAT_R8G8B8A8_UNORM)
+                .offset(8)
+            attributeDescriptions[2]
+                .binding(0)
+                .location(2)
+                .format(VK10.VK_FORMAT_R32G32_SFLOAT)
+                .offset(12)
+            attributeDescriptions[3]
+                .binding(0)
+                .location(3)
+                .format(VK10.VK_FORMAT_R8G8B8A8_UNORM)
+                .offset(20)
+
+            val vertexInputInfo = VkPipelineVertexInputStateCreateInfo.calloc(stack)
+            vertexInputInfo.sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO)
+            vertexInputInfo.pVertexBindingDescriptions(bindingDescriptions)
+            vertexInputInfo.pVertexAttributeDescriptions(attributeDescriptions)
+
+            val inputAssembly = VkPipelineInputAssemblyStateCreateInfo.calloc(stack)
+            inputAssembly.sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO)
+            inputAssembly.topology(VK10.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+            inputAssembly.primitiveRestartEnable(false)
+
+            val viewportState = VkPipelineViewportStateCreateInfo.calloc(stack)
+            viewportState.sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO)
+            viewportState.viewportCount(1)
+            viewportState.scissorCount(1)
+
+            val rasterizer = VkPipelineRasterizationStateCreateInfo.calloc(stack)
+            rasterizer.sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO)
+            rasterizer.depthClampEnable(false)
+            rasterizer.rasterizerDiscardEnable(false)
+            rasterizer.polygonMode(VK10.VK_POLYGON_MODE_FILL)
+            rasterizer.lineWidth(1f)
+            rasterizer.cullMode(VK10.VK_CULL_MODE_NONE)
+            rasterizer.frontFace(VK10.VK_FRONT_FACE_CLOCKWISE)
+            rasterizer.depthBiasEnable(false)
+
+            val multisampling = VkPipelineMultisampleStateCreateInfo.calloc(stack)
+            multisampling.sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO)
+            multisampling.sampleShadingEnable(false)
+            multisampling.rasterizationSamples(VK10.VK_SAMPLE_COUNT_1_BIT)
+
+            val colorBlendAttachment = VkPipelineColorBlendAttachmentState.calloc(1, stack)
+            colorBlendAttachment[0]
+                .blendEnable(blend.blendEnabled)
+                .srcColorBlendFactor(mapBlendFactor(blend.srcColor, false))
+                .dstColorBlendFactor(mapBlendFactor(blend.dstColor, false))
+                .colorBlendOp(mapBlendOp(blend.colorOp))
+                .srcAlphaBlendFactor(mapBlendFactor(blend.srcAlpha, true))
+                .dstAlphaBlendFactor(mapBlendFactor(blend.dstAlpha, true))
+                .alphaBlendOp(mapBlendOp(blend.alphaOp))
+                .colorWriteMask(
+                    VK10.VK_COLOR_COMPONENT_R_BIT or
+                        VK10.VK_COLOR_COMPONENT_G_BIT or
+                        VK10.VK_COLOR_COMPONENT_B_BIT or
+                        VK10.VK_COLOR_COMPONENT_A_BIT
+                )
+
+            val colorBlending = VkPipelineColorBlendStateCreateInfo.calloc(stack)
+            colorBlending.sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO)
+            colorBlending.logicOpEnable(false)
+            colorBlending.pAttachments(colorBlendAttachment)
+            colorBlending.blendConstants(0, 0f)
+            colorBlending.blendConstants(1, 0f)
+            colorBlending.blendConstants(2, 0f)
+            colorBlending.blendConstants(3, 0f)
+
+            val dynamicStates = stack.ints(
+                VK10.VK_DYNAMIC_STATE_VIEWPORT,
+                VK10.VK_DYNAMIC_STATE_SCISSOR,
+                VK10.VK_DYNAMIC_STATE_BLEND_CONSTANTS
+            )
+            val dynamicState = VkPipelineDynamicStateCreateInfo.calloc(stack)
+            dynamicState.sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO)
+            dynamicState.pDynamicStates(dynamicStates)
+
+            val pipelineInfo = VkGraphicsPipelineCreateInfo.calloc(1, stack)
+            pipelineInfo[0].sType(VK10.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO)
+            pipelineInfo[0].pStages(shaderStages)
+            pipelineInfo[0].pVertexInputState(vertexInputInfo)
+            pipelineInfo[0].pInputAssemblyState(inputAssembly)
+            pipelineInfo[0].pViewportState(viewportState)
+            pipelineInfo[0].pRasterizationState(rasterizer)
+            pipelineInfo[0].pMultisampleState(multisampling)
+            pipelineInfo[0].pColorBlendState(colorBlending)
+            pipelineInfo[0].pDynamicState(dynamicState)
+            pipelineInfo[0].layout(spritePipelineLayout)
+            pipelineInfo[0].renderPass(targetRenderPass)
+            pipelineInfo[0].subpass(0)
+
+            val pPipeline = stack.mallocLong(1)
+            check(
+                VK10.vkCreateGraphicsPipelines(device, VK10.VK_NULL_HANDLE, pipelineInfo, null, pPipeline),
+                "Failed creating Vulkan sprite graphics pipeline ($label)."
+            )
+
+            VK10.vkDestroyShaderModule(device, vertShaderModule, null)
+            VK10.vkDestroyShaderModule(device, fragShaderModule, null)
+            return pPipeline[0]
+        }
+    }
+
+    private fun mapBlendFactor(glFactor: Int, alphaChannel: Boolean): Int{
+        return when(glFactor){
+            GL20.GL_ZERO -> VK10.VK_BLEND_FACTOR_ZERO
+            GL20.GL_ONE -> VK10.VK_BLEND_FACTOR_ONE
+            GL20.GL_SRC_COLOR -> VK10.VK_BLEND_FACTOR_SRC_COLOR
+            GL20.GL_ONE_MINUS_SRC_COLOR -> VK10.VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR
+            GL20.GL_DST_COLOR -> VK10.VK_BLEND_FACTOR_DST_COLOR
+            GL20.GL_ONE_MINUS_DST_COLOR -> VK10.VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR
+            GL20.GL_SRC_ALPHA -> VK10.VK_BLEND_FACTOR_SRC_ALPHA
+            GL20.GL_ONE_MINUS_SRC_ALPHA -> VK10.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
+            GL20.GL_DST_ALPHA -> VK10.VK_BLEND_FACTOR_DST_ALPHA
+            GL20.GL_ONE_MINUS_DST_ALPHA -> VK10.VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA
+            GL20.GL_CONSTANT_COLOR -> if(alphaChannel) VK10.VK_BLEND_FACTOR_CONSTANT_ALPHA else VK10.VK_BLEND_FACTOR_CONSTANT_COLOR
+            GL20.GL_ONE_MINUS_CONSTANT_COLOR -> if(alphaChannel) VK10.VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA else VK10.VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR
+            GL20.GL_CONSTANT_ALPHA -> VK10.VK_BLEND_FACTOR_CONSTANT_ALPHA
+            GL20.GL_ONE_MINUS_CONSTANT_ALPHA -> VK10.VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA
+            GL20.GL_SRC_ALPHA_SATURATE -> if(alphaChannel) VK10.VK_BLEND_FACTOR_ONE else VK10.VK_BLEND_FACTOR_SRC_ALPHA_SATURATE
+            else -> VK10.VK_BLEND_FACTOR_ONE
+        }
+    }
+
+    private fun mapBlendOp(glOp: Int): Int{
+        return when(glOp){
+            GL20.GL_FUNC_ADD -> VK10.VK_BLEND_OP_ADD
+            GL20.GL_FUNC_SUBTRACT -> VK10.VK_BLEND_OP_SUBTRACT
+            GL20.GL_FUNC_REVERSE_SUBTRACT -> VK10.VK_BLEND_OP_REVERSE_SUBTRACT
+            GL30.GL_MIN -> VK10.VK_BLEND_OP_MIN
+            GL30.GL_MAX -> VK10.VK_BLEND_OP_MAX
+            else -> VK10.VK_BLEND_OP_ADD
+        }
+    }
+
+    private fun createHostVisibleBuffer(size: Int, usage: Int): HostVisibleBuffer{
+        MemoryStack.stackPush().use { stack ->
+            val bufferInfo = VkBufferCreateInfo.calloc(stack)
+            bufferInfo.sType(VK10.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO)
+            bufferInfo.size(size.toLong())
+            bufferInfo.usage(usage)
+            bufferInfo.sharingMode(VK10.VK_SHARING_MODE_EXCLUSIVE)
+
+            val pBuffer = stack.mallocLong(1)
+            check(VK10.vkCreateBuffer(device, bufferInfo, null, pBuffer), "Failed creating Vulkan buffer.")
+            val buffer = pBuffer[0]
+
+            val memReq = VkMemoryRequirements.calloc(stack)
+            VK10.vkGetBufferMemoryRequirements(device, buffer, memReq)
+
+            val allocInfo = VkMemoryAllocateInfo.calloc(stack)
+            allocInfo.sType(VK10.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO)
+            allocInfo.allocationSize(memReq.size())
+            allocInfo.memoryTypeIndex(
+                findMemoryType(
+                    memReq.memoryTypeBits(),
+                    VK10.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT or VK10.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                )
+            )
+
+            val pMemory = stack.mallocLong(1)
+            check(VK10.vkAllocateMemory(device, allocInfo, null, pMemory), "Failed allocating Vulkan buffer memory.")
+            val memory = pMemory[0]
+            check(VK10.vkBindBufferMemory(device, buffer, memory, 0), "Failed binding Vulkan buffer memory.")
+
+            val pMapped = stack.mallocPointer(1)
+            check(VK10.vkMapMemory(device, memory, 0, size.toLong(), 0, pMapped), "Failed mapping Vulkan buffer memory.")
+            val mappedPtr = pMapped[0]
+            val mapped = MemoryUtil.memByteBuffer(mappedPtr, size)
+            mapped.order(java.nio.ByteOrder.nativeOrder())
+
+            return HostVisibleBuffer(buffer, memory, mappedPtr, mapped)
+        }
+    }
+
+    private fun destroyHostVisibleBuffer(buffer: HostVisibleBuffer){
+        VK10.vkUnmapMemory(device, buffer.memory)
+        VK10.vkDestroyBuffer(device, buffer.buffer, null)
+        VK10.vkFreeMemory(device, buffer.memory, null)
+    }
+
+    private fun ensureTextureStagingBuffer(requiredBytes: Int){
+        if(requiredBytes <= 0) return
+        if(textureStagingBuffer != VK10.VK_NULL_HANDLE
+            && textureStagingMapped != null
+            && requiredBytes <= textureStagingCapacity){
+            return
+        }
+
+        destroyTextureStagingBuffer()
+        val capacity = nextPow2(max(requiredBytes, 64 * 1024))
+        val staging = createHostVisibleBuffer(capacity, VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+        textureStagingBuffer = staging.buffer
+        textureStagingMemory = staging.memory
+        textureStagingMappedPtr = staging.mappedPtr
+        textureStagingMapped = staging.mapped
+        textureStagingCapacity = capacity
+    }
+
+    private fun destroyTextureStagingBuffer(){
+        if(textureStagingMappedPtr != 0L){
+            VK10.vkUnmapMemory(device, textureStagingMemory)
+            textureStagingMappedPtr = 0L
+            textureStagingMapped = null
+        }
+        if(textureStagingBuffer != VK10.VK_NULL_HANDLE){
+            VK10.vkDestroyBuffer(device, textureStagingBuffer, null)
+            textureStagingBuffer = VK10.VK_NULL_HANDLE
+        }
+        if(textureStagingMemory != VK10.VK_NULL_HANDLE){
+            VK10.vkFreeMemory(device, textureStagingMemory, null)
+            textureStagingMemory = VK10.VK_NULL_HANDLE
+        }
+        textureStagingCapacity = 0
+    }
+
+    private fun stageTexturePixels(pixels: ByteBuffer, requiredBytes: Int): Long{
+        if(requiredBytes <= 0) return VK10.VK_NULL_HANDLE
+        ensureTextureStagingBuffer(requiredBytes)
+        val mapped = textureStagingMapped ?: return VK10.VK_NULL_HANDLE
+
+        val src = pixels.duplicate().order(java.nio.ByteOrder.nativeOrder())
+        src.position(0)
+        val copyBytes = min(requiredBytes, src.remaining())
+
+        mapped.position(0)
+        mapped.limit(requiredBytes)
+        if(copyBytes > 0){
+            val oldLimit = src.limit()
+            src.limit(src.position() + copyBytes)
+            mapped.put(src)
+            src.limit(oldLimit)
+        }
+        while(mapped.position() < requiredBytes){
+            mapped.put(0)
+        }
+        mapped.position(0)
+        mapped.limit(textureStagingCapacity)
+        return textureStagingBuffer
+    }
+
+    private fun transitionImageLayout(image: Long, oldLayout: Int, newLayout: Int){
+        runSingleTimeCommands { cmd, stack ->
+            val barrier = VkImageMemoryBarrier.calloc(1, stack)
+            barrier[0].sType(VK10.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER)
+            barrier[0].oldLayout(oldLayout)
+            barrier[0].newLayout(newLayout)
+            barrier[0].srcQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED)
+            barrier[0].dstQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED)
+            barrier[0].image(image)
+            barrier[0].subresourceRange(
+                VkImageSubresourceRange.calloc(stack)
+                    .aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
+                    .baseMipLevel(0)
+                    .levelCount(1)
+                    .baseArrayLayer(0)
+                    .layerCount(1)
+            )
+
+            var srcStage = VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+            var dstStage = VK10.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+
+            when{
+                oldLayout == VK10.VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL -> {
+                    barrier[0].srcAccessMask(0)
+                    barrier[0].dstAccessMask(VK10.VK_ACCESS_TRANSFER_WRITE_BIT)
+                    srcStage = VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                    dstStage = VK10.VK_PIPELINE_STAGE_TRANSFER_BIT
+                }
+                oldLayout == VK10.VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL -> {
+                    barrier[0].srcAccessMask(0)
+                    barrier[0].dstAccessMask(VK10.VK_ACCESS_SHADER_READ_BIT)
+                    srcStage = VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                    dstStage = VK10.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                }
+                oldLayout == VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && newLayout == VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL -> {
+                    barrier[0].srcAccessMask(VK10.VK_ACCESS_SHADER_READ_BIT)
+                    barrier[0].dstAccessMask(VK10.VK_ACCESS_TRANSFER_WRITE_BIT)
+                    srcStage = VK10.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                    dstStage = VK10.VK_PIPELINE_STAGE_TRANSFER_BIT
+                }
+                oldLayout == VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL -> {
+                    barrier[0].srcAccessMask(VK10.VK_ACCESS_TRANSFER_WRITE_BIT)
+                    barrier[0].dstAccessMask(VK10.VK_ACCESS_SHADER_READ_BIT)
+                    srcStage = VK10.VK_PIPELINE_STAGE_TRANSFER_BIT
+                    dstStage = VK10.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                }
+                else -> {
+                    barrier[0].srcAccessMask(0)
+                    barrier[0].dstAccessMask(0)
+                }
+            }
+
+            VK10.vkCmdPipelineBarrier(
+                cmd,
+                srcStage,
+                dstStage,
+                0,
+                null,
+                null,
+                barrier
+            )
+        }
+    }
+
+    private fun copyBufferToImage(buffer: Long, image: Long, xOffset: Int, yOffset: Int, width: Int, height: Int){
+        runSingleTimeCommands { cmd, stack ->
+            val region = VkBufferImageCopy.calloc(1, stack)
+            region[0].bufferOffset(0)
+            region[0].bufferRowLength(0)
+            region[0].bufferImageHeight(0)
+            region[0].imageSubresource()
+                .aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
+                .mipLevel(0)
+                .baseArrayLayer(0)
+                .layerCount(1)
+            region[0].imageOffset().set(xOffset, yOffset, 0)
+            region[0].imageExtent().set(width, height, 1)
+
+            VK10.vkCmdCopyBufferToImage(
+                cmd,
+                buffer,
+                image,
+                VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                region
+            )
+        }
+    }
+
+    private fun runSingleTimeCommands(block: (VkCommandBuffer, MemoryStack) -> Unit){
+        MemoryStack.stackPush().use { stack ->
+            val allocInfo = VkCommandBufferAllocateInfo.calloc(stack)
+            allocInfo.sType(VK10.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO)
+            allocInfo.commandPool(commandPool)
+            allocInfo.level(VK10.VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+            allocInfo.commandBufferCount(1)
+
+            val pCommandBuffer = stack.mallocPointer(1)
+            check(VK10.vkAllocateCommandBuffers(device, allocInfo, pCommandBuffer), "Failed allocating Vulkan single-time command buffer.")
+            val cmd = VkCommandBuffer(pCommandBuffer[0], device)
+
+            val beginInfo = VkCommandBufferBeginInfo.calloc(stack)
+            beginInfo.sType(VK10.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
+            beginInfo.flags(VK10.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
+            check(VK10.vkBeginCommandBuffer(cmd, beginInfo), "Failed beginning Vulkan single-time command buffer.")
+
+            block(cmd, stack)
+
+            check(VK10.vkEndCommandBuffer(cmd), "Failed ending Vulkan single-time command buffer.")
+
+            val submitInfo = VkSubmitInfo.calloc(1, stack)
+            submitInfo[0].sType(VK10.VK_STRUCTURE_TYPE_SUBMIT_INFO)
+            submitInfo[0].pCommandBuffers(stack.pointers(cmd.address()))
+            check(VK10.vkQueueSubmit(graphicsQueue, submitInfo[0], VK10.VK_NULL_HANDLE), "Failed submitting Vulkan single-time command buffer.")
+            VK10.vkQueueWaitIdle(graphicsQueue)
+            VK10.vkFreeCommandBuffers(device, commandPool, stack.pointers(cmd.address()))
+        }
+    }
+
+    private fun createShaderModule(stack: MemoryStack, spirv: ByteBuffer): Long{
+        try{
+            val moduleInfo = VkShaderModuleCreateInfo.calloc(stack)
+            moduleInfo.sType(VK10.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO)
+            moduleInfo.pCode(spirv)
+
+            val pModule = stack.mallocLong(1)
+            check(VK10.vkCreateShaderModule(device, moduleInfo, null, pModule), "Failed creating Vulkan shader module.")
+            return pModule[0]
+        }finally{
+            MemoryUtil.memFree(spirv)
+        }
+    }
+
+    private fun compileShader(source: String, kind: Int, fileName: String): ByteBuffer{
+        val compiler = Shaderc.shaderc_compiler_initialize()
+        if(compiler == 0L){
+            throw ArcRuntimeException("Failed to initialize shaderc compiler.")
+        }
+
+        val options = Shaderc.shaderc_compile_options_initialize()
+        if(options == 0L){
+            Shaderc.shaderc_compiler_release(compiler)
+            throw ArcRuntimeException("Failed to initialize shaderc compile options.")
+        }
+
+        try{
+            Shaderc.shaderc_compile_options_set_target_env(
+                options,
+                Shaderc.shaderc_target_env_vulkan,
+                Shaderc.shaderc_env_version_vulkan_1_0
+            )
+            Shaderc.shaderc_compile_options_set_target_spirv(options, Shaderc.shaderc_spirv_version_1_0)
+            Shaderc.shaderc_compile_options_set_auto_bind_uniforms(options, true)
+            Shaderc.shaderc_compile_options_set_auto_map_locations(options, true)
+            Shaderc.shaderc_compile_options_set_auto_combined_image_sampler(options, true)
+            Shaderc.shaderc_compile_options_set_optimization_level(options, Shaderc.shaderc_optimization_level_performance)
+
+            val result = Shaderc.shaderc_compile_into_spv(
+                compiler,
+                source,
+                kind,
+                fileName,
+                "main",
+                options
+            )
+            if(result == 0L){
+                throw ArcRuntimeException("shaderc returned null compile result for $fileName.")
+            }
+
+            try{
+                val status = Shaderc.shaderc_result_get_compilation_status(result)
+                if(status != Shaderc.shaderc_compilation_status_success){
+                    val message = Shaderc.shaderc_result_get_error_message(result)
+                    throw ArcRuntimeException("Failed compiling Vulkan shader $fileName: $message")
+                }
+
+                val bytes = Shaderc.shaderc_result_get_bytes(result)
+                    ?: throw ArcRuntimeException("shaderc returned null bytecode for $fileName.")
+                val out = MemoryUtil.memAlloc(bytes.remaining())
+                out.put(bytes)
+                out.flip()
+                return out
+            }finally{
+                Shaderc.shaderc_result_release(result)
+            }
+        }finally{
+            Shaderc.shaderc_compile_options_release(options)
+            Shaderc.shaderc_compiler_release(compiler)
+        }
+    }
+
+    private fun destroySpriteTexture(glTextureId: Int){
+        val texture = spriteTextures.remove(glTextureId) ?: return
+        if(texture.descriptorSet != VK10.VK_NULL_HANDLE && spriteDescriptorPool != VK10.VK_NULL_HANDLE){
+            MemoryStack.stackPush().use { stack ->
+                VK10.vkFreeDescriptorSets(device, spriteDescriptorPool, stack.longs(texture.descriptorSet))
+            }
+        }
+        if(texture.sampler != VK10.VK_NULL_HANDLE){
+            VK10.vkDestroySampler(device, texture.sampler, null)
+        }
+        if(texture.imageView != VK10.VK_NULL_HANDLE){
+            VK10.vkDestroyImageView(device, texture.imageView, null)
+        }
+        if(texture.image != VK10.VK_NULL_HANDLE){
+            VK10.vkDestroyImage(device, texture.image, null)
+        }
+        if(texture.memory != VK10.VK_NULL_HANDLE){
+            VK10.vkFreeMemory(device, texture.memory, null)
+        }
+    }
+
+    private fun findMemoryType(typeFilter: Int, properties: Int): Int{
+        MemoryStack.stackPush().use { stack ->
+            val memProperties = VkPhysicalDeviceMemoryProperties.calloc(stack)
+            VK10.vkGetPhysicalDeviceMemoryProperties(physicalDevice, memProperties)
+            for(i in 0 until memProperties.memoryTypeCount()){
+                if((typeFilter and (1 shl i)) != 0
+                    && (memProperties.memoryTypes(i).propertyFlags() and properties) == properties){
+                    return i
+                }
+            }
+        }
+        throw ArcRuntimeException("Failed finding suitable Vulkan memory type. filter=$typeFilter properties=$properties")
+    }
+
+    private fun align4(value: Int): Int{
+        return (value + 3) and 3.inv()
+    }
+
+    private fun nextPow2(value: Int): Int{
+        var v = max(1, value - 1)
+        v = v or (v shr 1)
+        v = v or (v shr 2)
+        v = v or (v shr 4)
+        v = v or (v shr 8)
+        v = v or (v shr 16)
+        return v + 1
+    }
+
+    private fun ensureSwapchainUpToDate(): Boolean{
+        MemoryStack.stackPush().use { stack ->
+            val pW = stack.mallocInt(1)
+            val pH = stack.mallocInt(1)
+            GLFW.glfwGetFramebufferSize(windowHandle, pW, pH)
+            val width = pW[0]
+            val height = pH[0]
+
+            if(width <= 0 || height <= 0){
+                return false
+            }
+            if(width != swapchainWidth || height != swapchainHeight){
+                recreateSwapchain()
+            }
+        }
+        return true
+    }
+
+    private fun recreateSwapchain(){
+        waitIdle()
+        destroySpritePipelines()
+        destroySwapchainResources()
+        createSwapchainResources(VK10.VK_NULL_HANDLE)
+        allocateCommandBuffers()
+        createSpritePipelines()
+    }
+
+    private fun createCommandResources(){
+        MemoryStack.stackPush().use { stack ->
+            val poolInfo = VkCommandPoolCreateInfo.calloc(stack)
+            poolInfo.sType(VK10.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO)
+            poolInfo.flags(VK10.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)
+            poolInfo.queueFamilyIndex(graphicsQueueFamily)
+
+            val pPool = stack.mallocLong(1)
+            check(VK10.vkCreateCommandPool(device, poolInfo, null, pPool), "Failed creating Vulkan command pool.")
+            commandPool = pPool[0]
+        }
+        allocateCommandBuffers()
+    }
+
+    private fun allocateCommandBuffers(){
+        MemoryStack.stackPush().use { stack ->
+            if(commandBuffers.isNotEmpty()){
+                val old = stack.mallocPointer(commandBuffers.size)
+                for(i in commandBuffers.indices){
+                    old.put(i, commandBuffers[i].address())
+                }
+                VK10.vkFreeCommandBuffers(device, commandPool, old)
+            }
+
+            val allocInfo = VkCommandBufferAllocateInfo.calloc(stack)
+            allocInfo.sType(VK10.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO)
+            allocInfo.commandPool(commandPool)
+            allocInfo.level(VK10.VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+            allocInfo.commandBufferCount(swapchainImages.size)
+
+            val pCommandBuffers = stack.mallocPointer(swapchainImages.size)
+            check(VK10.vkAllocateCommandBuffers(device, allocInfo, pCommandBuffers), "Failed allocating Vulkan command buffers.")
+
+            commandBuffers = Array(swapchainImages.size){ i ->
+                VkCommandBuffer(pCommandBuffers[i], device)
+            }
+        }
+    }
+
+    private fun createSyncResources(){
+        MemoryStack.stackPush().use { stack ->
+            val semaphoreInfo = VkSemaphoreCreateInfo.calloc(stack)
+            semaphoreInfo.sType(VK10.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO)
+
+            val fenceInfo = VkFenceCreateInfo.calloc(stack)
+            fenceInfo.sType(VK10.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO)
+            fenceInfo.flags(VK10.VK_FENCE_CREATE_SIGNALED_BIT)
+
+            val pHandle = stack.mallocLong(1)
+            for(i in 0 until maxFramesInFlight){
+                check(VK10.vkCreateSemaphore(device, semaphoreInfo, null, pHandle), "Failed creating Vulkan imageAvailable semaphore.")
+                imageAvailableSemaphores[i] = pHandle[0]
+
+                check(VK10.vkCreateSemaphore(device, semaphoreInfo, null, pHandle), "Failed creating Vulkan renderFinished semaphore.")
+                renderFinishedSemaphores[i] = pHandle[0]
+
+                check(VK10.vkCreateFence(device, fenceInfo, null, pHandle), "Failed creating Vulkan inFlight fence.")
+                inFlightFences[i] = pHandle[0]
+            }
+        }
+    }
+
+    private fun createSwapchainResources(oldSwapchain: Long){
+        MemoryStack.stackPush().use { stack ->
+            val support = querySwapchainSupport(stack)
+            val surfaceFormat = chooseSurfaceFormat(support.formats)
+            val presentMode = choosePresentMode(support.presentModes)
+            val extent = chooseExtent(support.capabilities, stack)
+            val imageCount = chooseImageCount(support.capabilities)
+
+            val swapchainInfo = VkSwapchainCreateInfoKHR.calloc(stack)
+            swapchainInfo.sType(KHRSwapchain.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR)
+            swapchainInfo.surface(surface)
+            swapchainInfo.minImageCount(imageCount)
+            swapchainInfo.imageFormat(surfaceFormat.format())
+            swapchainInfo.imageColorSpace(surfaceFormat.colorSpace())
+            swapchainInfo.imageExtent(extent)
+            swapchainInfo.imageArrayLayers(1)
+            swapchainInfo.imageUsage(VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+
+            if(graphicsQueueFamily != presentQueueFamily){
+                swapchainInfo.imageSharingMode(VK10.VK_SHARING_MODE_CONCURRENT)
+                swapchainInfo.pQueueFamilyIndices(stack.ints(graphicsQueueFamily, presentQueueFamily))
+            }else{
+                swapchainInfo.imageSharingMode(VK10.VK_SHARING_MODE_EXCLUSIVE)
+            }
+
+            swapchainInfo.preTransform(support.capabilities.currentTransform())
+            swapchainInfo.compositeAlpha(KHRSurface.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
+            swapchainInfo.presentMode(presentMode)
+            swapchainInfo.clipped(true)
+            swapchainInfo.oldSwapchain(oldSwapchain)
+
+            val pSwapchain = stack.mallocLong(1)
+            check(KHRSwapchain.vkCreateSwapchainKHR(device, swapchainInfo, null, pSwapchain), "Failed creating Vulkan swapchain.")
+            swapchain = pSwapchain[0]
+
+            val pImageCount = stack.mallocInt(1)
+            check(KHRSwapchain.vkGetSwapchainImagesKHR(device, swapchain, pImageCount, null), "Failed reading Vulkan swapchain image count.")
+            val pImages = stack.mallocLong(pImageCount[0])
+            check(KHRSwapchain.vkGetSwapchainImagesKHR(device, swapchain, pImageCount, pImages), "Failed reading Vulkan swapchain images.")
+
+            swapchainImages = LongArray(pImageCount[0]){ i -> pImages[i] }
+            swapchainFormat = surfaceFormat.format()
+            swapchainWidth = extent.width()
+            swapchainHeight = extent.height()
+        }
+
+        createImageViews()
+        createRenderPass()
+        createFramebuffers()
+    }
+
+    private fun createImageViews(){
+        swapchainImageViews = LongArray(swapchainImages.size)
+
+        MemoryStack.stackPush().use { stack ->
+            val imageViewInfo = VkImageViewCreateInfo.calloc(stack)
+            imageViewInfo.sType(VK10.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO)
+            imageViewInfo.viewType(VK10.VK_IMAGE_VIEW_TYPE_2D)
+            imageViewInfo.format(swapchainFormat)
+            imageViewInfo.subresourceRange(
+                VkImageSubresourceRange.calloc(stack)
+                    .aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
+                    .baseMipLevel(0)
+                    .levelCount(1)
+                    .baseArrayLayer(0)
+                    .layerCount(1)
+            )
+
+            val pView = stack.mallocLong(1)
+            for(i in swapchainImages.indices){
+                imageViewInfo.image(swapchainImages[i])
+                check(VK10.vkCreateImageView(device, imageViewInfo, null, pView), "Failed creating Vulkan swapchain image view.")
+                swapchainImageViews[i] = pView[0]
+            }
+        }
+    }
+
+    private fun createRenderPass(){
+        MemoryStack.stackPush().use { stack ->
+            val colorAttachment = VkAttachmentDescription.calloc(1, stack)
+            colorAttachment[0]
+                .format(swapchainFormat)
+                .samples(VK10.VK_SAMPLE_COUNT_1_BIT)
+                .loadOp(VK10.VK_ATTACHMENT_LOAD_OP_LOAD)
+                .storeOp(VK10.VK_ATTACHMENT_STORE_OP_STORE)
+                .stencilLoadOp(VK10.VK_ATTACHMENT_LOAD_OP_DONT_CARE)
+                .stencilStoreOp(VK10.VK_ATTACHMENT_STORE_OP_DONT_CARE)
+                .initialLayout(KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+                .finalLayout(KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+
+            val colorAttachmentRef = VkAttachmentReference.calloc(1, stack)
+            colorAttachmentRef[0]
+                .attachment(0)
+                .layout(VK10.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+
+            val subpass = VkSubpassDescription.calloc(1, stack)
+            subpass[0]
+                .pipelineBindPoint(VK10.VK_PIPELINE_BIND_POINT_GRAPHICS)
+                .colorAttachmentCount(1)
+                .pColorAttachments(colorAttachmentRef)
+
+            val dependency = VkSubpassDependency.calloc(1, stack)
+            dependency[0]
+                .srcSubpass(VK10.VK_SUBPASS_EXTERNAL)
+                .dstSubpass(0)
+                .srcStageMask(VK10.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+                .dstStageMask(VK10.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+                .srcAccessMask(0)
+                .dstAccessMask(VK10.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
+
+            val renderPassInfo = VkRenderPassCreateInfo.calloc(stack)
+            renderPassInfo.sType(VK10.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO)
+            renderPassInfo.pAttachments(colorAttachment)
+            renderPassInfo.pSubpasses(subpass)
+            renderPassInfo.pDependencies(dependency)
+
+            val pRenderPass = stack.mallocLong(1)
+            check(VK10.vkCreateRenderPass(device, renderPassInfo, null, pRenderPass), "Failed creating Vulkan render pass.")
+            renderPass = pRenderPass[0]
+        }
+    }
+
+    private fun createFramebuffers(){
+        framebuffers = LongArray(swapchainImageViews.size)
+
+        MemoryStack.stackPush().use { stack ->
+            val framebufferInfo = VkFramebufferCreateInfo.calloc(stack)
+            framebufferInfo.sType(VK10.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO)
+            framebufferInfo.renderPass(renderPass)
+            framebufferInfo.width(swapchainWidth)
+            framebufferInfo.height(swapchainHeight)
+            framebufferInfo.layers(1)
+
+            val pFramebuffer = stack.mallocLong(1)
+            for(i in swapchainImageViews.indices){
+                framebufferInfo.pAttachments(stack.longs(swapchainImageViews[i]))
+                check(VK10.vkCreateFramebuffer(device, framebufferInfo, null, pFramebuffer), "Failed creating Vulkan framebuffer.")
+                framebuffers[i] = pFramebuffer[0]
+            }
+        }
+    }
+
+    private fun destroySwapchainResources(){
+        MemoryStack.stackPush().use { stack ->
+            if(commandPool != VK10.VK_NULL_HANDLE && commandBuffers.isNotEmpty()){
+                val pCommandBuffers = stack.mallocPointer(commandBuffers.size)
+                for(i in commandBuffers.indices){
+                    pCommandBuffers.put(i, commandBuffers[i].address())
+                }
+                VK10.vkFreeCommandBuffers(device, commandPool, pCommandBuffers)
+                commandBuffers = emptyArray()
+            }
+        }
+
+        for(framebuffer in framebuffers){
+            if(framebuffer != VK10.VK_NULL_HANDLE){
+                VK10.vkDestroyFramebuffer(device, framebuffer, null)
+            }
+        }
+        framebuffers = LongArray(0)
+
+        if(renderPass != VK10.VK_NULL_HANDLE){
+            VK10.vkDestroyRenderPass(device, renderPass, null)
+            renderPass = VK10.VK_NULL_HANDLE
+        }
+
+        for(view in swapchainImageViews){
+            if(view != VK10.VK_NULL_HANDLE){
+                VK10.vkDestroyImageView(device, view, null)
+            }
+        }
+        swapchainImageViews = LongArray(0)
+        swapchainImages = LongArray(0)
+
+        if(swapchain != VK10.VK_NULL_HANDLE){
+            KHRSwapchain.vkDestroySwapchainKHR(device, swapchain, null)
+            swapchain = VK10.VK_NULL_HANDLE
+        }
+    }
+
+    private fun querySwapchainSupport(stack: MemoryStack): SwapchainSupport{
+        val capabilities = VkSurfaceCapabilitiesKHR.calloc(stack)
+        check(
+            KHRSurface.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, capabilities),
+            "Failed querying Vulkan surface capabilities."
+        )
+
+        val pFormatCount = stack.mallocInt(1)
+        check(
+            KHRSurface.vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, pFormatCount, null),
+            "Failed querying Vulkan surface format count."
+        )
+        if(pFormatCount[0] <= 0){
+            throw ArcRuntimeException("No Vulkan surface formats available.")
+        }
+        val formats = VkSurfaceFormatKHR.calloc(pFormatCount[0], stack)
+        check(
+            KHRSurface.vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, pFormatCount, formats),
+            "Failed querying Vulkan surface formats."
+        )
+
+        val pPresentModeCount = stack.mallocInt(1)
+        check(
+            KHRSurface.vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, pPresentModeCount, null),
+            "Failed querying Vulkan present mode count."
+        )
+        if(pPresentModeCount[0] <= 0){
+            throw ArcRuntimeException("No Vulkan present modes available.")
+        }
+        val presentModes = stack.mallocInt(pPresentModeCount[0])
+        check(
+            KHRSurface.vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, pPresentModeCount, presentModes),
+            "Failed querying Vulkan present modes."
+        )
+
+        return SwapchainSupport(capabilities, formats, presentModes)
+    }
+
+    private fun chooseSurfaceFormat(formats: VkSurfaceFormatKHR.Buffer): VkSurfaceFormatKHR{
+        for(i in 0 until formats.remaining()){
+            val format = formats[i]
+            if(format.format() == VK10.VK_FORMAT_B8G8R8A8_UNORM
+                && format.colorSpace() == KHRSurface.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR){
+                return format
+            }
+        }
+        return formats[0]
+    }
+
+    private fun choosePresentMode(presentModes: java.nio.IntBuffer): Int{
+        var hasMailbox = false
+        for(i in 0 until presentModes.remaining()){
+            if(presentModes[i] == KHRSurface.VK_PRESENT_MODE_MAILBOX_KHR){
+                hasMailbox = true
+                break
+            }
+        }
+        return if(hasMailbox) KHRSurface.VK_PRESENT_MODE_MAILBOX_KHR else KHRSurface.VK_PRESENT_MODE_FIFO_KHR
+    }
+
+    private fun chooseExtent(capabilities: VkSurfaceCapabilitiesKHR, stack: MemoryStack): VkExtent2D{
+        if(capabilities.currentExtent().width() != 0xFFFFFFFF.toInt()){
+            return VkExtent2D.calloc(stack).set(capabilities.currentExtent())
+        }
+
+        val pWidth = stack.mallocInt(1)
+        val pHeight = stack.mallocInt(1)
+        GLFW.glfwGetFramebufferSize(windowHandle, pWidth, pHeight)
+
+        val width = max(
+            capabilities.minImageExtent().width(),
+            min(capabilities.maxImageExtent().width(), pWidth[0])
+        )
+        val height = max(
+            capabilities.minImageExtent().height(),
+            min(capabilities.maxImageExtent().height(), pHeight[0])
+        )
+
+        return VkExtent2D.calloc(stack).set(width, height)
+    }
+
+    private fun chooseImageCount(capabilities: VkSurfaceCapabilitiesKHR): Int{
+        var imageCount = capabilities.minImageCount() + 1
+        if(capabilities.maxImageCount() > 0 && imageCount > capabilities.maxImageCount()){
+            imageCount = capabilities.maxImageCount()
+        }
+        return imageCount
+    }
+
+    private fun checkAcquire(result: Int){
+        if(result == VK10.VK_SUCCESS || result == KHRSwapchain.VK_SUBOPTIMAL_KHR){
+            return
+        }
+        throw ArcRuntimeException("Failed acquiring Vulkan swapchain image (error=$result).")
+    }
+
+    private fun check(result: Int, message: String){
+        if(result != VK10.VK_SUCCESS){
+            throw ArcRuntimeException("$message (error=$result)")
+        }
+    }
+
+    companion object{
+        private const val maxFramesInFlight = 2
+        private const val spriteVertexStride = 24
+        private const val spriteVertexBufferSize = 32 * 1024 * 1024
+        private const val spriteIndexBufferSize = 16 * 1024 * 1024
+        private const val maxSpriteTextures = 8192
+        private const val targetSwapchain = 0
+        private const val targetOffscreen = 1
+        private val traceEnabled = System.getProperty("arc.vulkan.trace") != null || System.getenv("ARC_VULKAN_TRACE") != null
+        @kotlin.jvm.Volatile private var vkGlobalInitialized = false
+        private val vkInitLock = Any()
+
+        private val spriteVertexShaderSource = """
+#version 450
+layout(location = 0) in vec2 a_position;
+layout(location = 1) in vec4 a_color;
+layout(location = 2) in vec2 a_texCoord0;
+layout(location = 3) in vec4 a_mix_color;
+
+layout(location = 0) out vec4 v_color;
+layout(location = 1) out vec4 v_mix_color;
+layout(location = 2) out vec2 v_texCoords;
+
+layout(push_constant) uniform Push {
+    mat4 u_projTrans;
+} pc;
+
+void main(){
+    v_color = a_color;
+    v_color.a = v_color.a * (255.0 / 254.0);
+    v_mix_color = a_mix_color;
+    v_mix_color.a = v_mix_color.a * (255.0 / 254.0);
+    v_texCoords = a_texCoord0;
+    vec4 pos = pc.u_projTrans * vec4(a_position, 0.0, 1.0);
+    // Convert GL clip-space conventions to Vulkan:
+    // - Y axis direction.
+    // - Z from [-w, +w] to [0, +w].
+    pos.y = -pos.y;
+    pos.z = (pos.z + pos.w) * 0.5;
+    gl_Position = pos;
+}
+"""
+
+        private val spriteFragmentShaderSource = """
+#version 450
+layout(location = 0) in vec4 v_color;
+layout(location = 1) in vec4 v_mix_color;
+layout(location = 2) in vec2 v_texCoords;
+
+layout(set = 0, binding = 0) uniform sampler2D u_texture;
+
+layout(location = 0) out vec4 outColor;
+
+void main(){
+    vec4 c = texture(u_texture, v_texCoords);
+    outColor = v_color * mix(c, vec4(v_mix_color.rgb, c.a), v_mix_color.a);
+}
+"""
+
+        private data class QueueFamilies(val graphics: Int, val present: Int)
+
+        private data class SwapchainSupport(
+            val capabilities: VkSurfaceCapabilitiesKHR,
+            val formats: VkSurfaceFormatKHR.Buffer,
+            val presentModes: java.nio.IntBuffer
+        )
+
+        fun create(windowHandle: Long): Lwjgl3VulkanRuntime{
+            ensureVkGlobalInitialized()
+
+            var instance: VkInstance? = null
+            var surface = VK10.VK_NULL_HANDLE
+            var device: VkDevice? = null
+            try{
+                MemoryStack.stackPush().use { stack ->
+                    val appInfo = VkApplicationInfo.calloc(stack)
+                    appInfo.sType(VK10.VK_STRUCTURE_TYPE_APPLICATION_INFO)
+                    appInfo.pApplicationName(stack.UTF8("Arc Vulkan Backend"))
+                    appInfo.pEngineName(stack.UTF8("Arc"))
+                    appInfo.applicationVersion(VK10.VK_MAKE_VERSION(1, 0, 0))
+                    appInfo.engineVersion(VK10.VK_MAKE_VERSION(1, 0, 0))
+                    appInfo.apiVersion(VK10.VK_API_VERSION_1_0)
+
+                    val requiredExtensions = GLFWVulkan.glfwGetRequiredInstanceExtensions()
+                        ?: throw ArcRuntimeException("GLFW did not provide required Vulkan instance extensions.")
+
+                    val instanceInfo = VkInstanceCreateInfo.calloc(stack)
+                    instanceInfo.sType(VK10.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO)
+                    instanceInfo.pApplicationInfo(appInfo)
+                    instanceInfo.ppEnabledExtensionNames(requiredExtensions)
+
+                    val pInstance = stack.mallocPointer(1)
+                    checkCreate(VK10.vkCreateInstance(instanceInfo, null, pInstance), "Failed to create Vulkan instance.")
+                    instance = VkInstance(pInstance[0], instanceInfo)
+
+                    val pSurface = stack.mallocLong(1)
+                    checkCreate(
+                        GLFWVulkan.glfwCreateWindowSurface(instance!!, windowHandle, null, pSurface),
+                        "Failed to create Vulkan window surface."
+                    )
+                    surface = pSurface[0]
+
+                    val selection = selectDevice(instance!!, surface, stack)
+                    val physicalDevice = selection.first
+                    val queueFamilies = selection.second
+
+                    val queuePriority = stack.floats(1f)
+                    val uniqueFamilies = if(queueFamilies.graphics == queueFamilies.present){
+                        intArrayOf(queueFamilies.graphics)
+                    }else{
+                        intArrayOf(queueFamilies.graphics, queueFamilies.present)
+                    }
+
+                    val queueInfos = VkDeviceQueueCreateInfo.calloc(uniqueFamilies.size, stack)
+                    for(i in uniqueFamilies.indices){
+                        queueInfos[i].sType(VK10.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO)
+                        queueInfos[i].queueFamilyIndex(uniqueFamilies[i])
+                        queueInfos[i].pQueuePriorities(queuePriority)
+                    }
+
+                    val deviceExtensions = stack.pointers(stack.UTF8(KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME))
+                    val deviceFeatures = VkPhysicalDeviceFeatures.calloc(stack)
+                    val deviceInfo = VkDeviceCreateInfo.calloc(stack)
+                    deviceInfo.sType(VK10.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
+                    deviceInfo.pQueueCreateInfos(queueInfos)
+                    deviceInfo.ppEnabledExtensionNames(deviceExtensions)
+                    deviceInfo.pEnabledFeatures(deviceFeatures)
+
+                    val pDevice = stack.mallocPointer(1)
+                    checkCreate(VK10.vkCreateDevice(physicalDevice, deviceInfo, null, pDevice), "Failed to create Vulkan logical device.")
+                    device = VkDevice(pDevice[0], physicalDevice, deviceInfo)
+
+                    val pQueue = stack.mallocPointer(1)
+                    VK10.vkGetDeviceQueue(device!!, queueFamilies.graphics, 0, pQueue)
+                    val graphicsQueue = VkQueue(pQueue[0], device!!)
+                    VK10.vkGetDeviceQueue(device!!, queueFamilies.present, 0, pQueue)
+                    val presentQueue = VkQueue(pQueue[0], device!!)
+
+                    return Lwjgl3VulkanRuntime(
+                        windowHandle = windowHandle,
+                        instance = instance!!,
+                        surface = surface,
+                        physicalDevice = physicalDevice,
+                        device = device!!,
+                        graphicsQueueFamily = queueFamilies.graphics,
+                        presentQueueFamily = queueFamilies.present,
+                        graphicsQueue = graphicsQueue,
+                        presentQueue = presentQueue
+                    )
+                }
+            }catch(e: Throwable){
+                if(device != null){
+                    VK10.vkDestroyDevice(device, null)
+                }
+                if(surface != VK10.VK_NULL_HANDLE && instance != null){
+                    KHRSurface.vkDestroySurfaceKHR(instance!!, surface, null)
+                }
+                if(instance != null){
+                    VK10.vkDestroyInstance(instance!!, null)
+                }
+                throw if(e is ArcRuntimeException) e else ArcRuntimeException("Failed to bootstrap Vulkan runtime.", e)
+            }
+        }
+
+        private fun selectDevice(instance: VkInstance, surface: Long, stack: MemoryStack): Pair<VkPhysicalDevice, QueueFamilies>{
+            val pDeviceCount = stack.mallocInt(1)
+            checkCreate(VK10.vkEnumeratePhysicalDevices(instance, pDeviceCount, null), "Failed to enumerate Vulkan physical devices.")
+            if(pDeviceCount[0] <= 0){
+                throw ArcRuntimeException("No Vulkan physical device found.")
+            }
+
+            val pDevices = stack.mallocPointer(pDeviceCount[0])
+            checkCreate(VK10.vkEnumeratePhysicalDevices(instance, pDeviceCount, pDevices), "Failed to enumerate Vulkan physical device list.")
+
+            var selectedDevice: VkPhysicalDevice? = null
+            var selectedFamilies: QueueFamilies? = null
+            for(i in 0 until pDeviceCount[0]){
+                val candidate = VkPhysicalDevice(pDevices[i], instance)
+                val families = findQueueFamilies(candidate, surface, stack) ?: continue
+                if(!supportsSwapchain(candidate, surface, stack)) continue
+                selectedDevice = candidate
+                selectedFamilies = families
+                break
+            }
+
+            if(selectedDevice == null || selectedFamilies == null){
+                throw ArcRuntimeException("No Vulkan physical device with graphics/present/swapchain support found.")
+            }
+            return Pair(selectedDevice, selectedFamilies)
+        }
+
+        private fun supportsSwapchain(physicalDevice: VkPhysicalDevice, surface: Long, stack: MemoryStack): Boolean{
+            if(!hasDeviceExtension(physicalDevice, KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME, stack)){
+                return false
+            }
+
+            val pFormatCount = stack.mallocInt(1)
+            checkCreate(
+                KHRSurface.vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, pFormatCount, null),
+                "Failed querying Vulkan surface format count."
+            )
+            if(pFormatCount[0] <= 0) return false
+
+            val pPresentModeCount = stack.mallocInt(1)
+            checkCreate(
+                KHRSurface.vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, pPresentModeCount, null),
+                "Failed querying Vulkan present mode count."
+            )
+            return pPresentModeCount[0] > 0
+        }
+
+        private fun hasDeviceExtension(physicalDevice: VkPhysicalDevice, extensionName: String, stack: MemoryStack): Boolean{
+            val pExtensionCount = stack.mallocInt(1)
+            checkCreate(
+                VK10.vkEnumerateDeviceExtensionProperties(physicalDevice, null as ByteBuffer?, pExtensionCount, null),
+                "Failed querying Vulkan device extension count."
+            )
+            if(pExtensionCount[0] <= 0) return false
+
+            val extensions = VkExtensionProperties.calloc(pExtensionCount[0], stack)
+            checkCreate(
+                VK10.vkEnumerateDeviceExtensionProperties(physicalDevice, null as ByteBuffer?, pExtensionCount, extensions),
+                "Failed querying Vulkan device extensions."
+            )
+
+            for(i in 0 until extensions.remaining()){
+                if(extensions[i].extensionNameString() == extensionName){
+                    return true
+                }
+            }
+            return false
+        }
+
+        private fun findQueueFamilies(physicalDevice: VkPhysicalDevice, surface: Long, stack: MemoryStack): QueueFamilies?{
+            val pQueueCount = stack.mallocInt(1)
+            VK10.vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, pQueueCount, null)
+            if(pQueueCount[0] <= 0) return null
+
+            val queueProps = VkQueueFamilyProperties.calloc(pQueueCount[0], stack)
+            VK10.vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, pQueueCount, queueProps)
+
+            var graphicsFamily = -1
+            var presentFamily = -1
+            for(i in 0 until pQueueCount[0]){
+                if((queueProps[i].queueFlags() and VK10.VK_QUEUE_GRAPHICS_BIT) != 0){
+                    graphicsFamily = i
+                }
+
+                val presentSupport = stack.mallocInt(1)
+                val result = KHRSurface.vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, i, surface, presentSupport)
+                if(result == VK10.VK_SUCCESS && presentSupport[0] == VK10.VK_TRUE){
+                    presentFamily = i
+                }
+
+                if(graphicsFamily >= 0 && presentFamily >= 0){
+                    break
+                }
+            }
+
+            return if(graphicsFamily >= 0 && presentFamily >= 0){
+                QueueFamilies(graphicsFamily, presentFamily)
+            }else{
+                null
+            }
+        }
+
+        private fun checkCreate(result: Int, message: String){
+            if(result != VK10.VK_SUCCESS){
+                throw ArcRuntimeException("$message (error=$result)")
+            }
+        }
+
+        private fun ensureVkGlobalInitialized(){
+            if(vkGlobalInitialized) return
+
+            synchronized(vkInitLock){
+                if(vkGlobalInitialized) return
+
+                try{
+                    VK.create()
+                }catch(e: IllegalStateException){
+                    if(e.message?.contains("already been created", ignoreCase = true) != true){
+                        throw e
+                    }
+                }
+
+                vkGlobalInitialized = true
+            }
+        }
+    }
+}
