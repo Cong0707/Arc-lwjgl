@@ -8,6 +8,7 @@ import arc.Graphics.Cursor.SystemCursor
 import arc.graphics.GL20
 import arc.graphics.GL30
 import arc.graphics.Pixmap
+import arc.graphics.Vulkan
 import arc.graphics.gl.GLVersion
 import arc.graphics.gl.HdpiMode
 import arc.math.geom.Point2
@@ -25,6 +26,7 @@ import kotlin.concurrent.Volatile
 
 class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     private var gLVersion: GLVersion? = null
+    private var vulkanCompat: Lwjgl3VulkanCompatLayer? = null
 
     @Volatile
     private var backBufferWidth: Int = 0
@@ -69,7 +71,9 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
                 window.listener.resize(width, height)
                 update()
                 window.listener.update()
-                GLFW.glfwSwapBuffers(windowHandle)
+                if(!window.config.useVulkan){
+                    GLFW.glfwSwapBuffers(windowHandle)
+                }
             } else {
                 window.asyncResized = true
             }
@@ -77,35 +81,64 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     init {
-        if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL30) {
+        if (window.config.useVulkan) {
+            val vk = Lwjgl3VulkanCompatLayer(window.windowHandle)
+            if (!vk.isSupported()) {
+                throw ArcRuntimeException("Vulkan backend requested, but Vulkan is not supported on this runtime.")
+            }
+
+            vulkanCompat = vk
+            Core.vk = vk
+            Core.gl30 = vk
+            Core.gl20 = vk
+            Core.gl = vk
+            Log.info("Choosing Vulkan Backend @", vk.getBackendName())
+        } else if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL30) {
+            Core.vk = null
             Core.gl30 = Lwjgl3GL30()
             Core.gl20 = Core.gl30
             Core.gl = Core.gl20
         } else if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.ANGLE_GLES30) {
+            Core.vk = null
             Core.gl30 = Class.forName("arc.backend.lwjgl3.angle.Lwjgl3GLES30").newInstance() as GL30
             Core.gl20 = Core.gl30
             Core.gl = Core.gl20
         } else if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.ANGLE_GLES20) {
+            Core.vk = null
             Core.gl30 = null
             Core.gl20 = Class.forName("arc.backend.lwjgl3.angle.Lwjgl3GLES20").newInstance() as GL20
             Core.gl = Core.gl20
         } else if (window.config.glEmulation == Lwjgl3ApplicationConfiguration.GLEmulation.GL20) {
             try {
+                Core.vk = null
                 Core.gl20 = Lwjgl3GL20()
             } catch (t: Throwable) {
                 throw ArcRuntimeException("Couldn't instantiate GL20.", t)
             }
             Core.gl30 = null
+            Core.gl = Core.gl20
         } else {
             throw ArcRuntimeException("Couldn't find OpenGL.")
         }
         updateFramebufferInfo()
         initiateGL()
-        Log.info("Choosing GL Version @", Lwjgl3Application.glVersion!!.debugVersionString)
+        if(!window.config.useVulkan && Lwjgl3Application.glVersion != null){
+            Log.info("Choosing GL Version @", Lwjgl3Application.glVersion!!.debugVersionString)
+        }
         GLFW.glfwSetFramebufferSizeCallback(window.windowHandle, resizeCallback)
     }
 
     private fun initiateGL() {
+        if(window.config.useVulkan){
+            gLVersion = GLVersion(
+                Application.ApplicationType.desktop,
+                "Vulkan 1.0 (Arc native Vulkan backend)",
+                "Arc",
+                "LWJGL3 Vulkan"
+            )
+            return
+        }
+
         val versionString: String = Core.gl20!!.glGetString(GL11.GL_VERSION)
         val vendorString: String = Core.gl20!!.glGetString(GL11.GL_VENDOR)
         val rendererString: String = Core.gl20!!.glGetString(GL11.GL_RENDERER)
@@ -154,6 +187,10 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
 
     override fun setGL20(gl20: GL20?) {
         Core.gl20 = gl20
+        Core.gl = gl20
+        if (gl20 !is Vulkan) {
+            Core.vk = null
+        }
     }
 
     override fun getGL30(): GL30? {
@@ -162,6 +199,11 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
 
     override fun setGL30(gl30: GL30?) {
         Core.gl30 = gl30
+        if (gl30 != null) {
+            Core.gl20 = gl30
+            Core.gl = gl30
+        }
+        Core.vk = if (gl30 is Vulkan) gl30 else null
     }
 
     override fun getWidth(): Int {
@@ -201,6 +243,9 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     override fun getGLVersion(): GLVersion {
+        if(window.config.useVulkan){
+            return gLVersion!!
+        }
         val versionString = gl20.glGetString(GL11.GL_VERSION)
         val vendorString = gl20.glGetString(GL11.GL_VENDOR)
         val rendererString = gl20.glGetString(GL11.GL_RENDERER)
@@ -396,7 +441,9 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
 
     override fun setVSync(vsync: Boolean) {
         window.config.vSyncEnabled = vsync
-        GLFW.glfwSwapInterval(if (vsync) 1 else 0)
+        if(!window.config.useVulkan){
+            GLFW.glfwSwapInterval(if (vsync) 1 else 0)
+        }
     }
 
     override fun getBufferFormat(): BufferFormat {
@@ -413,6 +460,9 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     override fun supportsExtension(extension: String): Boolean {
+        if(window.config.useVulkan){
+            return false
+        }
         return GLFW.glfwExtensionSupported(extension)
     }
 
@@ -443,6 +493,8 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     }
 
     override fun dispose() {
+        vulkanCompat?.dispose()
+        vulkanCompat = null
         resizeCallback.free()
     }
 

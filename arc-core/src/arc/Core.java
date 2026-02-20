@@ -5,6 +5,7 @@ import arc.audio.Audio;
 import arc.graphics.Camera;
 import arc.graphics.GL20;
 import arc.graphics.GL30;
+import arc.graphics.Vulkan;
 import arc.graphics.g2d.Batch;
 import arc.graphics.g2d.TextureAtlas;
 import arc.scene.Scene;
@@ -31,4 +32,5 @@ public class Core{
     public static GL20 gl;
     public static GL20 gl20;
     public static GL30 gl30;
+    public static Vulkan vk;
 }

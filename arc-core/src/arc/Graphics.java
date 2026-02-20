@@ -37,6 +37,21 @@ public abstract class Graphics implements Disposable{
         return Core.gl30 != null;
     }
 
+    /** @return whether a Vulkan backend is available. */
+    public boolean isVulkanAvailable(){
+        return Core.vk != null && Core.vk.isSupported();
+    }
+
+    /** @return the Vulkan interface or null when unavailable. */
+    public Vulkan getVulkan(){
+        return Core.vk;
+    }
+
+    /** Sets the Vulkan interface instance. */
+    public void setVulkan(Vulkan vk){
+        Core.vk = vk;
+    }
+
     /** @return whether instancing with glVertexAttribDivisor and glDrawElementsInstanced is available on this platform. */
     public boolean supportsInstancing(){
         if(OS.isAndroid || OS.isIos){

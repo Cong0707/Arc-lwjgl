@@ -7,6 +7,7 @@ import arc.Files
 import arc.backend.lwjgl3.*
 import arc.files.Fi
 import arc.graphics.Pixmap
+import arc.graphics.Vulkan
 import arc.struct.Seq
 import arc.util.Disposable
 import arc.util.OS
@@ -288,15 +289,31 @@ class Lwjgl3Window internal constructor(
             Core.gl20.glViewport(0, 0, graphics!!.backBufferWidth, graphics!!.backBufferHeight)
             listener.resize(graphics!!.width, graphics!!.height)
             graphics!!.update()
-            listener.update()
-            GLFW.glfwSwapBuffers(windowHandle)
+            val vk = Core.vk
+            vk?.beginFrame()
+            try {
+                listener.update()
+            } finally {
+                vk?.endFrame()
+            }
+            if(!config.useVulkan){
+                GLFW.glfwSwapBuffers(windowHandle)
+            }
             return true
         }
 
         if (shouldRender) {
             graphics!!.update()
-            listener.update()
-            GLFW.glfwSwapBuffers(windowHandle)
+            val vk = Core.vk
+            vk?.beginFrame()
+            try {
+                listener.update()
+            } finally {
+                vk?.endFrame()
+            }
+            if(!config.useVulkan){
+                GLFW.glfwSwapBuffers(windowHandle)
+            }
         }
 
         if (!isIconified) input!!.prepareNext()
@@ -327,9 +344,12 @@ class Lwjgl3Window internal constructor(
         Core.gl30 = graphics?.gL30
         Core.gl20 = if (Core.gl30 != null) Core.gl30 else graphics!!.gL20
         Core.gl = Core.gl20
+        Core.vk = if (Core.gl30 is Vulkan) Core.gl30 as Vulkan else null
         Core.input = input
 
-        GLFW.glfwMakeContextCurrent(windowHandle)
+        if(!config.useVulkan){
+            GLFW.glfwMakeContextCurrent(windowHandle)
+        }
     }
 
     override fun dispose() {

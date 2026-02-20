@@ -217,6 +217,11 @@ public final class FxProcessor implements Disposable{
         if(capturing) throw new IllegalStateException("Cannot clean up buffers when capturing.");
         if(applyingEffects) throw new IllegalStateException("Cannot clean up buffers when applying effects.");
 
+        if(shouldBypassForVulkanCompat()){
+            hasCaptured = false;
+            return;
+        }
+
         pingPongBuffer.clear(color);
         hasCaptured = false;
     }
@@ -234,6 +239,11 @@ public final class FxProcessor implements Disposable{
         if(disabled) return false;
         if(capturing) return false;
 
+        if(shouldBypassForVulkanCompat()){
+            capturing = true;
+            return true;
+        }
+
         Draw.flush();
 
         capturing = true;
@@ -247,6 +257,12 @@ public final class FxProcessor implements Disposable{
      */
     public boolean end(){
         if(!capturing) return false;
+
+        if(shouldBypassForVulkanCompat()){
+            hasCaptured = true;
+            capturing = false;
+            return true;
+        }
 
         Draw.flush();
 
@@ -266,6 +282,7 @@ public final class FxProcessor implements Disposable{
 
         if(disabled) return;
         if(!hasCaptured) return;
+        if(shouldBypassForVulkanCompat()) return;
 
         effectsAll.each(FxFilter::update);
 
@@ -313,6 +330,7 @@ public final class FxProcessor implements Disposable{
         }
         if(disabled) return;
         if(!hasCaptured) return;
+        if(shouldBypassForVulkanCompat()) return;
 
         // Enable blending to preserve buffer's alpha values.
         if(blendingEnabled){
@@ -332,6 +350,7 @@ public final class FxProcessor implements Disposable{
         }
         if(disabled) return;
         if(!hasCaptured) return;
+        if(shouldBypassForVulkanCompat()) return;
 
         // Enable blending to preserve buffer's alpha values.
         if(blendingEnabled){
@@ -349,6 +368,7 @@ public final class FxProcessor implements Disposable{
         }
         if(disabled) return;
         if(!hasCaptured) return;
+        if(shouldBypassForVulkanCompat()) return;
 
         // Enable blending to preserve buffer's alpha values.
         if(blendingEnabled){
@@ -358,5 +378,9 @@ public final class FxProcessor implements Disposable{
         if(blendingEnabled){
             Gl.disable(Gl.blend);
         }
+    }
+
+    private boolean shouldBypassForVulkanCompat(){
+        return Core.vk != null && Core.vk.isSupported() && Core.vk.getBackendName().contains("Compat");
     }
 }
