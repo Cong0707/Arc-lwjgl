@@ -79,6 +79,9 @@ import org.lwjgl.vulkan.VkVertexInputBindingDescription
 import org.lwjgl.vulkan.VkViewport
 import org.lwjgl.vulkan.VkWriteDescriptorSet
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.FloatBuffer
+import java.nio.LongBuffer
 import java.nio.ShortBuffer
 import kotlin.math.max
 import kotlin.math.min
@@ -123,6 +126,12 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
     private var traceFrameCounter = 0L
     private var traceDrawCallsThisFrame = 0
+    private var perfWaitIdleCallsThisFrame = 0
+    private var perfSingleTimeCommandsThisFrame = 0
+    private var perfInlineTextureTransfersThisFrame = 0
+    private var perfTextureStagingRecreateThisFrame = 0
+    private var perfTextureStagingAllocBytesThisFrame = 0L
+    private var perfDefaultEffectFallbackThisFrame = 0
 
     private var spriteDescriptorSetLayout = VK10.VK_NULL_HANDLE
     private var spritePipelineLayout = VK10.VK_NULL_HANDLE
@@ -147,6 +156,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private var textureStagingMappedPtr = 0L
     private var textureStagingMapped: ByteBuffer? = null
     private var textureStagingCapacity = 0
+    private var textureStagingCursor = 0
 
     private val framebufferAttachments = HashMap<Int, FramebufferAttachment>()
     private val offscreenTargets = HashMap<Int, OffscreenTarget>()
@@ -168,6 +178,20 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private var scissorHeight = 0
     private var scissorSet = false
     private var scissorEnabled = false
+
+    private val bindVertexBufferHandles: LongBuffer = ByteBuffer.allocateDirect(java.lang.Long.BYTES).order(ByteOrder.nativeOrder()).asLongBuffer()
+    private val bindVertexBufferOffsets: LongBuffer = ByteBuffer.allocateDirect(java.lang.Long.BYTES).order(ByteOrder.nativeOrder()).asLongBuffer()
+    private val bindDescriptorSets: LongBuffer = ByteBuffer.allocateDirect(java.lang.Long.BYTES).order(ByteOrder.nativeOrder()).asLongBuffer()
+    private val blendConstantsScratch: FloatBuffer = ByteBuffer.allocateDirect(4 * java.lang.Float.BYTES).order(ByteOrder.nativeOrder()).asFloatBuffer()
+    private val pushConstantsScratch: ByteBuffer = ByteBuffer.allocateDirect(spritePushConstantSizeBytes).order(ByteOrder.nativeOrder())
+    private val pushConstantsScratchFloats: FloatBuffer = pushConstantsScratch.asFloatBuffer()
+
+    private var boundPipeline = VK10.VK_NULL_HANDLE
+    private var boundDescriptorSet = VK10.VK_NULL_HANDLE
+    private var boundBlendColorR = Float.NaN
+    private var boundBlendColorG = Float.NaN
+    private var boundBlendColorB = Float.NaN
+    private var boundBlendColorA = Float.NaN
 
     private data class SpriteTexture(
         var width: Int,
@@ -195,6 +219,11 @@ internal class Lwjgl3VulkanRuntime private constructor(
         var imageView: Long,
         var width: Int,
         var height: Int
+    )
+
+    private data class StagedTextureUpload(
+        val buffer: Long,
+        val offset: Int
     )
 
     private data class SpritePipelineKey(
@@ -347,8 +376,6 @@ internal class Lwjgl3VulkanRuntime private constructor(
         if(glTextureId == 0 || width <= 0 || height <= 0) return
         val hasPixels = rgbaPixels != null
 
-        waitIdle()
-
         val existing = spriteTextures[glTextureId]
         if(existing != null && existing.width == width && existing.height == height){
             if(hasPixels){
@@ -364,11 +391,13 @@ internal class Lwjgl3VulkanRuntime private constructor(
                 || existing.magFilter != magFilter
                 || existing.wrapS != wrapS
                 || existing.wrapT != wrapT){
+                waitIdle()
                 updateTextureSampler(existing, minFilter, magFilter, wrapS, wrapT)
             }
             return
         }
 
+        waitIdle()
         destroyOffscreenTargetsUsingTexture(glTextureId)
         destroySpriteTexture(glTextureId)
 
@@ -487,8 +516,6 @@ internal class Lwjgl3VulkanRuntime private constructor(
     ){
         if(glTextureId == 0 || width <= 0 || height <= 0) return
 
-        waitIdle()
-
         val texture = spriteTextures[glTextureId] ?: return
         if(xOffset < 0 || yOffset < 0
             || xOffset + width > texture.width
@@ -500,6 +527,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
             || texture.magFilter != magFilter
             || texture.wrapS != wrapS
             || texture.wrapT != wrapT){
+            waitIdle()
             updateTextureSampler(texture, minFilter, magFilter, wrapS, wrapT)
         }
 
@@ -529,11 +557,23 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
     private fun uploadTexturePixels(image: Long, width: Int, height: Int, pixels: ByteBuffer, oldLayout: Int){
         val byteCount = width * height * 4
-        val stagingBuffer = stageTexturePixels(pixels, byteCount)
-        if(stagingBuffer == VK10.VK_NULL_HANDLE) return
-        transitionImageLayout(image, oldLayout, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-        copyBufferToImage(stagingBuffer, image, 0, 0, width, height)
-        transitionImageLayout(image, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        val staging = stageTexturePixels(pixels, byteCount)
+        if(staging == null){
+            uploadTextureWithTempStaging(pixels, byteCount) { buffer ->
+                runSingleTimeCommands { cmd, stack ->
+                    transitionImageLayoutCmd(cmd, stack, image, oldLayout, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+                    copyBufferToImageCmd(cmd, stack, buffer, 0L, image, 0, 0, width, height)
+                    transitionImageLayoutCmd(cmd, stack, image, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                }
+            }
+            return
+        }
+        if(recordTextureUploadInline(image, oldLayout, 0, 0, width, height, staging)) return
+        runSingleTimeCommands { cmd, stack ->
+            transitionImageLayoutCmd(cmd, stack, image, oldLayout, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+            copyBufferToImageCmd(cmd, stack, staging.buffer, staging.offset.toLong(), image, 0, 0, width, height)
+            transitionImageLayoutCmd(cmd, stack, image, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        }
     }
 
     private fun uploadTextureSubPixels(
@@ -545,12 +585,72 @@ internal class Lwjgl3VulkanRuntime private constructor(
         pixels: ByteBuffer
     ){
         val byteCount = width * height * 4
-        val stagingBuffer = stageTexturePixels(pixels, byteCount)
-        if(stagingBuffer == VK10.VK_NULL_HANDLE) return
+        val staging = stageTexturePixels(pixels, byteCount)
+        if(staging == null){
+            uploadTextureWithTempStaging(pixels, byteCount) { buffer ->
+                runSingleTimeCommands { cmd, stack ->
+                    transitionImageLayoutCmd(cmd, stack, image, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+                    copyBufferToImageCmd(cmd, stack, buffer, 0L, image, xOffset, yOffset, width, height)
+                    transitionImageLayoutCmd(cmd, stack, image, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                }
+            }
+            return
+        }
+        if(recordTextureUploadInline(image, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, xOffset, yOffset, width, height, staging)) return
 
-        transitionImageLayout(image, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-        copyBufferToImage(stagingBuffer, image, xOffset, yOffset, width, height)
-        transitionImageLayout(image, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        runSingleTimeCommands { cmd, stack ->
+            transitionImageLayoutCmd(cmd, stack, image, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+            copyBufferToImageCmd(cmd, stack, staging.buffer, staging.offset.toLong(), image, xOffset, yOffset, width, height)
+            transitionImageLayoutCmd(cmd, stack, image, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        }
+    }
+
+    private fun recordTextureUploadInline(
+        image: Long,
+        oldLayout: Int,
+        xOffset: Int,
+        yOffset: Int,
+        width: Int,
+        height: Int,
+        staging: StagedTextureUpload
+    ): Boolean{
+        if(!frameActive) return false
+        val cmd = currentCommandBuffer ?: return false
+        endActiveRenderPass(cmd)
+        MemoryStack.stackPush().use { stack ->
+            transitionImageLayoutCmd(cmd, stack, image, oldLayout, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+            copyBufferToImageCmd(cmd, stack, staging.buffer, staging.offset.toLong(), image, xOffset, yOffset, width, height)
+            transitionImageLayoutCmd(cmd, stack, image, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        }
+        if(perfTraceEnabled) perfInlineTextureTransfersThisFrame++
+        return true
+    }
+
+    private inline fun uploadTextureWithTempStaging(pixels: ByteBuffer, requiredBytes: Int, crossinline block: (Long) -> Unit){
+        if(requiredBytes <= 0) return
+        val staging = createHostVisibleBuffer(requiredBytes, VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+        try{
+            val mapped = staging.mapped
+            val src = pixels.duplicate().order(ByteOrder.nativeOrder())
+            src.position(0)
+            val copyBytes = min(requiredBytes, src.remaining())
+            mapped.position(0)
+            mapped.limit(requiredBytes)
+            if(copyBytes > 0){
+                val oldLimit = src.limit()
+                src.limit(src.position() + copyBytes)
+                mapped.put(src)
+                src.limit(oldLimit)
+            }
+            while(mapped.position() < requiredBytes){
+                mapped.put(0)
+            }
+            mapped.position(0)
+            mapped.limit(requiredBytes)
+            block(staging.buffer)
+        }finally{
+            destroyHostVisibleBuffer(staging)
+        }
     }
 
     private fun updateTextureSampler(texture: SpriteTexture, minFilter: Int, magFilter: Int, wrapS: Int, wrapT: Int){
@@ -682,72 +782,145 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
         val vertexBytes = vertices.remaining()
         val indexBytes = indexCount * 2
+        if(indices.remaining() < indexCount) return
         if(spriteVertexCursor + vertexBytes > spriteVertexBufferSize || spriteIndexCursor + indexBytes > spriteIndexBufferSize){
             return
         }
 
-        val srcVerts = vertices.duplicate()
-        srcVerts.position(0)
-        mappedVertex.position(spriteVertexCursor)
-        mappedVertex.put(srcVerts)
         val vertexOffset = spriteVertexCursor
+        if(vertices.isDirect){
+            val srcAddress = MemoryUtil.memAddress(vertices) + vertices.position().toLong()
+            MemoryUtil.memCopy(srcAddress, spriteVertexMappedPtr + vertexOffset.toLong(), vertexBytes.toLong())
+        }else{
+            val srcVerts = vertices.duplicate()
+            val srcLimit = srcVerts.limit()
+            srcVerts.limit(srcVerts.position() + vertexBytes)
+            val dstVerts = mappedVertex.duplicate()
+            dstVerts.position(vertexOffset)
+            dstVerts.limit(vertexOffset + vertexBytes)
+            dstVerts.put(srcVerts)
+            srcVerts.limit(srcLimit)
+        }
         spriteVertexCursor += align4(vertexBytes)
 
-        val dstIndices = mappedIndex.duplicate()
-        dstIndices.position(spriteIndexCursor)
-        dstIndices.limit(spriteIndexCursor + indexBytes)
-        val dstShort = dstIndices.slice().order(java.nio.ByteOrder.nativeOrder()).asShortBuffer()
-        val srcShort = indices.duplicate()
-        srcShort.position(0)
-        dstShort.put(srcShort)
         val indexOffset = spriteIndexCursor
+        if(indices.isDirect){
+            val srcAddress = MemoryUtil.memAddress(indices) + indices.position().toLong() * 2L
+            MemoryUtil.memCopy(srcAddress, spriteIndexMappedPtr + indexOffset.toLong(), indexBytes.toLong())
+        }else{
+            val dstIndices = mappedIndex.duplicate()
+            dstIndices.position(indexOffset)
+            dstIndices.limit(indexOffset + indexBytes)
+            val dstShort = dstIndices.slice().order(ByteOrder.nativeOrder()).asShortBuffer()
+            val srcShort = indices.duplicate()
+            val srcLimit = srcShort.limit()
+            srcShort.limit(srcShort.position() + indexCount)
+            dstShort.put(srcShort)
+            srcShort.limit(srcLimit)
+        }
         spriteIndexCursor += align4(indexBytes)
 
-        MemoryStack.stackPush().use { stack ->
+        if(boundPipeline != pipeline){
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline)
-            VK10.vkCmdBindVertexBuffers(cmd, 0, stack.longs(spriteVertexBuffer), stack.longs(vertexOffset.toLong()))
-            VK10.vkCmdBindIndexBuffer(cmd, spriteIndexBuffer, indexOffset.toLong(), VK10.VK_INDEX_TYPE_UINT16)
+            boundPipeline = pipeline
+            boundDescriptorSet = VK10.VK_NULL_HANDLE
+        }
+
+        bindVertexBufferHandles.position(0)
+        bindVertexBufferHandles.limit(1)
+        bindVertexBufferHandles.put(0, spriteVertexBuffer)
+        bindVertexBufferOffsets.position(0)
+        bindVertexBufferOffsets.limit(1)
+        bindVertexBufferOffsets.put(0, vertexOffset.toLong())
+        VK10.vkCmdBindVertexBuffers(cmd, 0, bindVertexBufferHandles, bindVertexBufferOffsets)
+        VK10.vkCmdBindIndexBuffer(cmd, spriteIndexBuffer, indexOffset.toLong(), VK10.VK_INDEX_TYPE_UINT16)
+
+        if(boundDescriptorSet != texture.descriptorSet){
+            bindDescriptorSets.position(0)
+            bindDescriptorSets.limit(1)
+            bindDescriptorSets.put(0, texture.descriptorSet)
             VK10.vkCmdBindDescriptorSets(
                 cmd,
                 VK10.VK_PIPELINE_BIND_POINT_GRAPHICS,
                 spritePipelineLayout,
                 0,
-                stack.longs(texture.descriptorSet),
+                bindDescriptorSets,
                 null
             )
-            VK10.vkCmdSetBlendConstants(cmd, stack.floats(blendColorR, blendColorG, blendColorB, blendColorA))
-
-            val pushBytes = stack.malloc(spritePushConstantSizeBytes)
-            val pushFloats = pushBytes.asFloatBuffer()
-            for(i in 0 until 16){
-                pushFloats.put(i, projTrans[i])
-            }
-            val texWidthDefault = texture.width.toFloat().coerceAtLeast(1f)
-            val texHeightDefault = texture.height.toFloat().coerceAtLeast(1f)
-            val effect = effectUniforms ?: EffectUniforms(
-                texWidth = texWidthDefault,
-                texHeight = texHeightDefault,
-                invWidth = 1f / texWidthDefault,
-                invHeight = 1f / texHeightDefault,
-                time = 0f,
-                dp = 1f,
-                offsetX = 0f,
-                offsetY = 0f
-            )
-            pushFloats.put(16, effect.texWidth)
-            pushFloats.put(17, effect.texHeight)
-            pushFloats.put(18, effect.invWidth)
-            pushFloats.put(19, effect.invHeight)
-            pushFloats.put(20, effect.time)
-            pushFloats.put(21, effect.dp)
-            pushFloats.put(22, effect.offsetX)
-            pushFloats.put(23, effect.offsetY)
-            VK10.vkCmdPushConstants(cmd, spritePipelineLayout, VK10.VK_SHADER_STAGE_VERTEX_BIT or VK10.VK_SHADER_STAGE_FRAGMENT_BIT, 0, pushBytes)
-
-            VK10.vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0)
+            boundDescriptorSet = texture.descriptorSet
         }
 
-        if(traceEnabled){
+        if(boundBlendColorR != blendColorR
+            || boundBlendColorG != blendColorG
+            || boundBlendColorB != blendColorB
+            || boundBlendColorA != blendColorA){
+            blendConstantsScratch.position(0)
+            blendConstantsScratch.limit(4)
+            blendConstantsScratch.put(0, blendColorR)
+            blendConstantsScratch.put(1, blendColorG)
+            blendConstantsScratch.put(2, blendColorB)
+            blendConstantsScratch.put(3, blendColorA)
+            VK10.vkCmdSetBlendConstants(cmd, blendConstantsScratch)
+            boundBlendColorR = blendColorR
+            boundBlendColorG = blendColorG
+            boundBlendColorB = blendColorB
+            boundBlendColorA = blendColorA
+        }
+
+        for(i in 0 until 16){
+            pushConstantsScratchFloats.put(i, projTrans[i])
+        }
+        val texWidthDefault = texture.width.toFloat().coerceAtLeast(1f)
+        val texHeightDefault = texture.height.toFloat().coerceAtLeast(1f)
+        val effectTexWidth: Float
+        val effectTexHeight: Float
+        val effectInvWidth: Float
+        val effectInvHeight: Float
+        val effectTime: Float
+        val effectDp: Float
+        val effectOffsetX: Float
+        val effectOffsetY: Float
+        if(effectUniforms == null){
+            effectTexWidth = texWidthDefault
+            effectTexHeight = texHeightDefault
+            effectInvWidth = 1f / texWidthDefault
+            effectInvHeight = 1f / texHeightDefault
+            effectTime = 0f
+            effectDp = 1f
+            effectOffsetX = 0f
+            effectOffsetY = 0f
+            if(perfTraceEnabled) perfDefaultEffectFallbackThisFrame++
+        }else{
+            effectTexWidth = effectUniforms.texWidth
+            effectTexHeight = effectUniforms.texHeight
+            effectInvWidth = effectUniforms.invWidth
+            effectInvHeight = effectUniforms.invHeight
+            effectTime = effectUniforms.time
+            effectDp = effectUniforms.dp
+            effectOffsetX = effectUniforms.offsetX
+            effectOffsetY = effectUniforms.offsetY
+        }
+        pushConstantsScratchFloats.put(16, effectTexWidth)
+        pushConstantsScratchFloats.put(17, effectTexHeight)
+        pushConstantsScratchFloats.put(18, effectInvWidth)
+        pushConstantsScratchFloats.put(19, effectInvHeight)
+        pushConstantsScratchFloats.put(20, effectTime)
+        pushConstantsScratchFloats.put(21, effectDp)
+        pushConstantsScratchFloats.put(22, effectOffsetX)
+        pushConstantsScratchFloats.put(23, effectOffsetY)
+        pushConstantsScratch.position(0)
+        pushConstantsScratch.limit(spritePushConstantSizeBytes)
+        VK10.vkCmdPushConstants(
+            cmd,
+            spritePipelineLayout,
+            VK10.VK_SHADER_STAGE_VERTEX_BIT or VK10.VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            pushConstantsScratch
+        )
+
+        VK10.vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0)
+
+        if(traceEnabled || perfTraceEnabled){
             traceDrawCallsThisFrame++
         }
     }
@@ -825,6 +998,15 @@ internal class Lwjgl3VulkanRuntime private constructor(
         return true
     }
 
+    private fun resetDrawBindingCache(){
+        boundPipeline = VK10.VK_NULL_HANDLE
+        boundDescriptorSet = VK10.VK_NULL_HANDLE
+        boundBlendColorR = Float.NaN
+        boundBlendColorG = Float.NaN
+        boundBlendColorB = Float.NaN
+        boundBlendColorA = Float.NaN
+    }
+
     private fun beginRenderPass(commandBuffer: VkCommandBuffer, targetRenderPass: Long, framebuffer: Long, width: Int, height: Int){
         MemoryStack.stackPush().use { stack ->
             val clearValues = org.lwjgl.vulkan.VkClearValue.calloc(1, stack)
@@ -848,6 +1030,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
             VK10.vkCmdBeginRenderPass(commandBuffer, renderPassInfo, VK10.VK_SUBPASS_CONTENTS_INLINE)
             applyViewport(commandBuffer, width, height)
             applyScissor(commandBuffer, width, height)
+            resetDrawBindingCache()
         }
     }
 
@@ -857,6 +1040,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         activeFramebuffer = Int.MIN_VALUE
         activeTargetWidth = 0
         activeTargetHeight = 0
+        resetDrawBindingCache()
     }
 
     private fun applyViewport(commandBuffer: VkCommandBuffer, targetWidth: Int, targetHeight: Int){
@@ -981,6 +1165,16 @@ internal class Lwjgl3VulkanRuntime private constructor(
         if(frameActive) return
         if(!ensureSwapchainUpToDate()) return
 
+        if(perfTraceEnabled){
+            perfWaitIdleCallsThisFrame = 0
+            perfSingleTimeCommandsThisFrame = 0
+            perfInlineTextureTransfersThisFrame = 0
+            perfTextureStagingRecreateThisFrame = 0
+            perfTextureStagingAllocBytesThisFrame = 0L
+            perfDefaultEffectFallbackThisFrame = 0
+        }
+        textureStagingCursor = 0
+        resetDrawBindingCache()
         MemoryStack.stackPush().use { stack ->
             val waitFence = inFlightFences[currentFrame]
             check(VK10.vkWaitForFences(device, waitFence, true, Long.MAX_VALUE), "Failed waiting for Vulkan frame fence.")
@@ -1071,15 +1265,30 @@ internal class Lwjgl3VulkanRuntime private constructor(
         activeTargetHeight = 0
         frameActive = false
 
+        traceFrameCounter++
         if(traceEnabled){
-            traceFrameCounter++
             if(traceFrameCounter % 60L == 0L){
                 Log.info("Vulkan frame @ drawCalls=@ swap=@x@", traceFrameCounter, traceDrawCallsThisFrame, swapchainWidth, swapchainHeight)
             }
         }
+        if(perfTraceEnabled && traceFrameCounter % 120L == 0L){
+            Log.info(
+                "Vulkan perf frame @ drawCalls=@ waitIdle=@ oneShotCmd=@ inlineTex=@ staging(recreate=@ allocBytes=@ cap=@) defaultFxFallback=@",
+                traceFrameCounter,
+                traceDrawCallsThisFrame,
+                perfWaitIdleCallsThisFrame,
+                perfSingleTimeCommandsThisFrame,
+                perfInlineTextureTransfersThisFrame,
+                perfTextureStagingRecreateThisFrame,
+                perfTextureStagingAllocBytesThisFrame,
+                textureStagingCapacity,
+                perfDefaultEffectFallbackThisFrame
+            )
+        }
     }
 
     fun waitIdle(){
+        if(perfTraceEnabled) perfWaitIdleCallsThisFrame++
         VK10.vkDeviceWaitIdle(device)
     }
 
@@ -1595,6 +1804,10 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
         destroyTextureStagingBuffer()
         val capacity = nextPow2(max(requiredBytes, 64 * 1024))
+        if(perfTraceEnabled){
+            perfTextureStagingRecreateThisFrame++
+            perfTextureStagingAllocBytesThisFrame += capacity.toLong()
+        }
         val staging = createHostVisibleBuffer(capacity, VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
         textureStagingBuffer = staging.buffer
         textureStagingMemory = staging.memory
@@ -1618,122 +1831,152 @@ internal class Lwjgl3VulkanRuntime private constructor(
             textureStagingMemory = VK10.VK_NULL_HANDLE
         }
         textureStagingCapacity = 0
+        textureStagingCursor = 0
     }
 
-    private fun stageTexturePixels(pixels: ByteBuffer, requiredBytes: Int): Long{
-        if(requiredBytes <= 0) return VK10.VK_NULL_HANDLE
-        ensureTextureStagingBuffer(requiredBytes)
-        val mapped = textureStagingMapped ?: return VK10.VK_NULL_HANDLE
+    private fun stageTexturePixels(pixels: ByteBuffer, requiredBytes: Int): StagedTextureUpload?{
+        if(requiredBytes <= 0) return null
+        val appendInFrame = frameActive && currentCommandBuffer != null
+        val offset = if(appendInFrame) textureStagingCursor else 0
+        val requiredCapacity = offset + requiredBytes
+        if(appendInFrame && textureStagingCursor > 0 && requiredCapacity > textureStagingCapacity){
+            // Can't resize the shared staging buffer after this frame already recorded copies that reference it.
+            return null
+        }
+        ensureTextureStagingBuffer(requiredCapacity)
+        val mapped = textureStagingMapped ?: return null
 
-        val src = pixels.duplicate().order(java.nio.ByteOrder.nativeOrder())
+        val src = pixels.duplicate().order(ByteOrder.nativeOrder())
         src.position(0)
         val copyBytes = min(requiredBytes, src.remaining())
 
-        mapped.position(0)
-        mapped.limit(requiredBytes)
+        mapped.position(offset)
+        mapped.limit(offset + requiredBytes)
         if(copyBytes > 0){
             val oldLimit = src.limit()
             src.limit(src.position() + copyBytes)
             mapped.put(src)
             src.limit(oldLimit)
         }
-        while(mapped.position() < requiredBytes){
+        while(mapped.position() < offset + requiredBytes){
             mapped.put(0)
         }
         mapped.position(0)
         mapped.limit(textureStagingCapacity)
-        return textureStagingBuffer
+        if(appendInFrame){
+            textureStagingCursor = align4(offset + requiredBytes)
+        }
+        return StagedTextureUpload(textureStagingBuffer, offset)
     }
 
     private fun transitionImageLayout(image: Long, oldLayout: Int, newLayout: Int){
         runSingleTimeCommands { cmd, stack ->
-            val barrier = VkImageMemoryBarrier.calloc(1, stack)
-            barrier[0].sType(VK10.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER)
-            barrier[0].oldLayout(oldLayout)
-            barrier[0].newLayout(newLayout)
-            barrier[0].srcQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED)
-            barrier[0].dstQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED)
-            barrier[0].image(image)
-            barrier[0].subresourceRange(
-                VkImageSubresourceRange.calloc(stack)
-                    .aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
-                    .baseMipLevel(0)
-                    .levelCount(1)
-                    .baseArrayLayer(0)
-                    .layerCount(1)
-            )
-
-            var srcStage = VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
-            var dstStage = VK10.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-
-            when{
-                oldLayout == VK10.VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL -> {
-                    barrier[0].srcAccessMask(0)
-                    barrier[0].dstAccessMask(VK10.VK_ACCESS_TRANSFER_WRITE_BIT)
-                    srcStage = VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
-                    dstStage = VK10.VK_PIPELINE_STAGE_TRANSFER_BIT
-                }
-                oldLayout == VK10.VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL -> {
-                    barrier[0].srcAccessMask(0)
-                    barrier[0].dstAccessMask(VK10.VK_ACCESS_SHADER_READ_BIT)
-                    srcStage = VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
-                    dstStage = VK10.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                }
-                oldLayout == VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && newLayout == VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL -> {
-                    barrier[0].srcAccessMask(VK10.VK_ACCESS_SHADER_READ_BIT)
-                    barrier[0].dstAccessMask(VK10.VK_ACCESS_TRANSFER_WRITE_BIT)
-                    srcStage = VK10.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                    dstStage = VK10.VK_PIPELINE_STAGE_TRANSFER_BIT
-                }
-                oldLayout == VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL -> {
-                    barrier[0].srcAccessMask(VK10.VK_ACCESS_TRANSFER_WRITE_BIT)
-                    barrier[0].dstAccessMask(VK10.VK_ACCESS_SHADER_READ_BIT)
-                    srcStage = VK10.VK_PIPELINE_STAGE_TRANSFER_BIT
-                    dstStage = VK10.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                }
-                else -> {
-                    barrier[0].srcAccessMask(0)
-                    barrier[0].dstAccessMask(0)
-                }
-            }
-
-            VK10.vkCmdPipelineBarrier(
-                cmd,
-                srcStage,
-                dstStage,
-                0,
-                null,
-                null,
-                barrier
-            )
+            transitionImageLayoutCmd(cmd, stack, image, oldLayout, newLayout)
         }
     }
 
-    private fun copyBufferToImage(buffer: Long, image: Long, xOffset: Int, yOffset: Int, width: Int, height: Int){
+    private fun copyBufferToImage(buffer: Long, bufferOffset: Long, image: Long, xOffset: Int, yOffset: Int, width: Int, height: Int){
         runSingleTimeCommands { cmd, stack ->
-            val region = VkBufferImageCopy.calloc(1, stack)
-            region[0].bufferOffset(0)
-            region[0].bufferRowLength(0)
-            region[0].bufferImageHeight(0)
-            region[0].imageSubresource()
+            copyBufferToImageCmd(cmd, stack, buffer, bufferOffset, image, xOffset, yOffset, width, height)
+        }
+    }
+
+    private fun transitionImageLayoutCmd(cmd: VkCommandBuffer, stack: MemoryStack, image: Long, oldLayout: Int, newLayout: Int){
+        val barrier = VkImageMemoryBarrier.calloc(1, stack)
+        barrier[0].sType(VK10.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER)
+        barrier[0].oldLayout(oldLayout)
+        barrier[0].newLayout(newLayout)
+        barrier[0].srcQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED)
+        barrier[0].dstQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED)
+        barrier[0].image(image)
+        barrier[0].subresourceRange(
+            VkImageSubresourceRange.calloc(stack)
                 .aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
-                .mipLevel(0)
+                .baseMipLevel(0)
+                .levelCount(1)
                 .baseArrayLayer(0)
                 .layerCount(1)
-            region[0].imageOffset().set(xOffset, yOffset, 0)
-            region[0].imageExtent().set(width, height, 1)
+        )
 
-            VK10.vkCmdCopyBufferToImage(
-                cmd,
-                buffer,
-                image,
-                VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                region
-            )
+        var srcStage = VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+        var dstStage = VK10.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+
+        when{
+            oldLayout == VK10.VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL -> {
+                barrier[0].srcAccessMask(0)
+                barrier[0].dstAccessMask(VK10.VK_ACCESS_TRANSFER_WRITE_BIT)
+                srcStage = VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                dstStage = VK10.VK_PIPELINE_STAGE_TRANSFER_BIT
+            }
+            oldLayout == VK10.VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL -> {
+                barrier[0].srcAccessMask(0)
+                barrier[0].dstAccessMask(VK10.VK_ACCESS_SHADER_READ_BIT)
+                srcStage = VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                dstStage = VK10.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+            }
+            oldLayout == VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && newLayout == VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL -> {
+                barrier[0].srcAccessMask(VK10.VK_ACCESS_SHADER_READ_BIT)
+                barrier[0].dstAccessMask(VK10.VK_ACCESS_TRANSFER_WRITE_BIT)
+                srcStage = VK10.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                dstStage = VK10.VK_PIPELINE_STAGE_TRANSFER_BIT
+            }
+            oldLayout == VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL -> {
+                barrier[0].srcAccessMask(VK10.VK_ACCESS_TRANSFER_WRITE_BIT)
+                barrier[0].dstAccessMask(VK10.VK_ACCESS_SHADER_READ_BIT)
+                srcStage = VK10.VK_PIPELINE_STAGE_TRANSFER_BIT
+                dstStage = VK10.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+            }
+            else -> {
+                barrier[0].srcAccessMask(0)
+                barrier[0].dstAccessMask(0)
+            }
         }
+
+        VK10.vkCmdPipelineBarrier(
+            cmd,
+            srcStage,
+            dstStage,
+            0,
+            null,
+            null,
+            barrier
+        )
+    }
+
+    private fun copyBufferToImageCmd(
+        cmd: VkCommandBuffer,
+        stack: MemoryStack,
+        buffer: Long,
+        bufferOffset: Long,
+        image: Long,
+        xOffset: Int,
+        yOffset: Int,
+        width: Int,
+        height: Int
+    ){
+        val region = VkBufferImageCopy.calloc(1, stack)
+        region[0].bufferOffset(bufferOffset)
+        region[0].bufferRowLength(0)
+        region[0].bufferImageHeight(0)
+        region[0].imageSubresource()
+            .aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
+            .mipLevel(0)
+            .baseArrayLayer(0)
+            .layerCount(1)
+        region[0].imageOffset().set(xOffset, yOffset, 0)
+        region[0].imageExtent().set(width, height, 1)
+
+        VK10.vkCmdCopyBufferToImage(
+            cmd,
+            buffer,
+            image,
+            VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            region
+        )
     }
 
     private fun runSingleTimeCommands(block: (VkCommandBuffer, MemoryStack) -> Unit){
+        if(perfTraceEnabled) perfSingleTimeCommandsThisFrame++
         MemoryStack.stackPush().use { stack ->
             val allocInfo = VkCommandBufferAllocateInfo.calloc(stack)
             allocInfo.sType(VK10.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO)
@@ -2265,6 +2508,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         private const val targetSwapchain = 0
         private const val targetOffscreen = 1
         private val traceEnabled = System.getProperty("arc.vulkan.trace") != null || System.getenv("ARC_VULKAN_TRACE") != null
+        private val perfTraceEnabled = System.getProperty("arc.vulkan.perf") != null || System.getenv("ARC_VULKAN_PERF") != null
         @kotlin.jvm.Volatile private var vkGlobalInitialized = false
         private val vkInitLock = Any()
 
