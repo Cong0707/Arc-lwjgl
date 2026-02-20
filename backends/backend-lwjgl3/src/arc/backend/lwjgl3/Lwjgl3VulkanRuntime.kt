@@ -199,6 +199,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
     private data class SpritePipelineKey(
         val target: Int,
+        val shaderVariant: Int,
         val blendEnabled: Boolean,
         val srcColor: Int,
         val dstColor: Int,
@@ -210,6 +211,23 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
     var frameActive = false
         private set
+
+    enum class SpriteShaderVariant{
+        Default,
+        Shield,
+        BuildBeam
+    }
+
+    data class EffectUniforms(
+        val texWidth: Float,
+        val texHeight: Float,
+        val invWidth: Float,
+        val invHeight: Float,
+        val time: Float,
+        val dp: Float,
+        val offsetX: Float,
+        val offsetY: Float
+    )
 
     init{
         createSwapchainResources(VK10.VK_NULL_HANDLE)
@@ -628,6 +646,8 @@ internal class Lwjgl3VulkanRuntime private constructor(
         indexCount: Int,
         textureId: Int,
         projTrans: FloatArray,
+        shaderVariant: SpriteShaderVariant,
+        effectUniforms: EffectUniforms?,
         blendEnabled: Boolean,
         blendSrcColor: Int,
         blendDstColor: Int,
@@ -649,6 +669,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
         val pipeline = getSpritePipeline(
             activeFramebuffer == 0,
+            shaderVariant,
             blendEnabled,
             blendSrcColor,
             blendDstColor,
@@ -696,12 +717,32 @@ internal class Lwjgl3VulkanRuntime private constructor(
             )
             VK10.vkCmdSetBlendConstants(cmd, stack.floats(blendColorR, blendColorG, blendColorB, blendColorA))
 
-            val pushBytes = stack.malloc(64)
+            val pushBytes = stack.malloc(spritePushConstantSizeBytes)
             val pushFloats = pushBytes.asFloatBuffer()
             for(i in 0 until 16){
                 pushFloats.put(i, projTrans[i])
             }
-            VK10.vkCmdPushConstants(cmd, spritePipelineLayout, VK10.VK_SHADER_STAGE_VERTEX_BIT, 0, pushBytes)
+            val texWidthDefault = texture.width.toFloat().coerceAtLeast(1f)
+            val texHeightDefault = texture.height.toFloat().coerceAtLeast(1f)
+            val effect = effectUniforms ?: EffectUniforms(
+                texWidth = texWidthDefault,
+                texHeight = texHeightDefault,
+                invWidth = 1f / texWidthDefault,
+                invHeight = 1f / texHeightDefault,
+                time = 0f,
+                dp = 1f,
+                offsetX = 0f,
+                offsetY = 0f
+            )
+            pushFloats.put(16, effect.texWidth)
+            pushFloats.put(17, effect.texHeight)
+            pushFloats.put(18, effect.invWidth)
+            pushFloats.put(19, effect.invHeight)
+            pushFloats.put(20, effect.time)
+            pushFloats.put(21, effect.dp)
+            pushFloats.put(22, effect.offsetX)
+            pushFloats.put(23, effect.offsetY)
+            VK10.vkCmdPushConstants(cmd, spritePipelineLayout, VK10.VK_SHADER_STAGE_VERTEX_BIT or VK10.VK_SHADER_STAGE_FRAGMENT_BIT, 0, pushBytes)
 
             VK10.vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0)
         }
@@ -713,6 +754,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
     private fun getSpritePipeline(
         swapchainTarget: Boolean,
+        shaderVariant: SpriteShaderVariant,
         blendEnabled: Boolean,
         blendSrcColor: Int,
         blendDstColor: Int,
@@ -724,6 +766,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         val renderTarget = if(swapchainTarget) targetSwapchain else targetOffscreen
         val key = SpritePipelineKey(
             target = renderTarget,
+            shaderVariant = shaderVariant.ordinal,
             blendEnabled = blendEnabled,
             srcColor = blendSrcColor,
             dstColor = blendDstColor,
@@ -737,7 +780,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         val renderPass = if(swapchainTarget) renderPass else offscreenRenderPass
         if(renderPass == VK10.VK_NULL_HANDLE) return VK10.VK_NULL_HANDLE
 
-        val pipeline = createSpritePipeline(renderPass, "target=$renderTarget", key)
+        val pipeline = createSpritePipeline(renderPass, "target=$renderTarget variant=${shaderVariant.name}", shaderVariant, key)
         spritePipelines[key] = pipeline
         return pipeline
     }
@@ -1132,9 +1175,9 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
             val pushConstant = VkPushConstantRange.calloc(1, stack)
             pushConstant[0]
-                .stageFlags(VK10.VK_SHADER_STAGE_VERTEX_BIT)
+                .stageFlags(VK10.VK_SHADER_STAGE_VERTEX_BIT or VK10.VK_SHADER_STAGE_FRAGMENT_BIT)
                 .offset(0)
-                .size(64)
+                .size(spritePushConstantSizeBytes)
 
             val pipelineLayoutInfo = VkPipelineLayoutCreateInfo.calloc(stack)
             pipelineLayoutInfo.sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO)
@@ -1276,6 +1319,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         if(renderPass != VK10.VK_NULL_HANDLE){
             getSpritePipeline(
                 swapchainTarget = true,
+                shaderVariant = SpriteShaderVariant.Default,
                 blendEnabled = true,
                 blendSrcColor = GL20.GL_SRC_ALPHA,
                 blendDstColor = GL20.GL_ONE_MINUS_SRC_ALPHA,
@@ -1288,6 +1332,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         if(offscreenRenderPass != VK10.VK_NULL_HANDLE){
             getSpritePipeline(
                 swapchainTarget = false,
+                shaderVariant = SpriteShaderVariant.Default,
                 blendEnabled = true,
                 blendSrcColor = GL20.GL_SRC_ALPHA,
                 blendDstColor = GL20.GL_ONE_MINUS_SRC_ALPHA,
@@ -1308,7 +1353,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         spritePipelines.clear()
     }
 
-    private fun createSpritePipeline(targetRenderPass: Long, label: String, blend: SpritePipelineKey): Long{
+    private fun createSpritePipeline(targetRenderPass: Long, label: String, shaderVariant: SpriteShaderVariant, blend: SpritePipelineKey): Long{
         MemoryStack.stackPush().use { stack ->
             val vertShaderModule = createShaderModule(
                 stack,
@@ -1321,7 +1366,11 @@ internal class Lwjgl3VulkanRuntime private constructor(
             val fragShaderModule = createShaderModule(
                 stack,
                 compileShader(
-                    spriteFragmentShaderSource,
+                    when(shaderVariant){
+                        SpriteShaderVariant.Default -> spriteFragmentShaderSource
+                        SpriteShaderVariant.Shield -> shieldFragmentShaderSource
+                        SpriteShaderVariant.BuildBeam -> buildBeamFragmentShaderSource
+                    },
                     Shaderc.shaderc_fragment_shader,
                     "sprite-$label.frag"
                 )
@@ -2209,6 +2258,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
     companion object{
         private const val maxFramesInFlight = 2
         private const val spriteVertexStride = 24
+        private const val spritePushConstantSizeBytes = 24 * 4
         private const val spriteVertexBufferSize = 32 * 1024 * 1024
         private const val spriteIndexBufferSize = 16 * 1024 * 1024
         private const val maxSpriteTextures = 8192
@@ -2231,6 +2281,11 @@ layout(location = 2) out vec2 v_texCoords;
 
 layout(push_constant) uniform Push {
     mat4 u_projTrans;
+    vec2 u_texsize;
+    vec2 u_invsize;
+    float u_time;
+    float u_dp;
+    vec2 u_offset;
 } pc;
 
 void main(){
@@ -2262,6 +2317,94 @@ layout(location = 0) out vec4 outColor;
 void main(){
     vec4 c = texture(u_texture, v_texCoords);
     outColor = v_color * mix(c, vec4(v_mix_color.rgb, c.a), v_mix_color.a);
+}
+"""
+
+        private val shieldFragmentShaderSource = """
+#version 450
+layout(location = 2) in vec2 v_texCoords;
+
+layout(set = 0, binding = 0) uniform sampler2D u_texture;
+
+layout(push_constant) uniform Push {
+    mat4 u_projTrans;
+    vec2 u_texsize;
+    vec2 u_invsize;
+    float u_time;
+    float u_dp;
+    vec2 u_offset;
+} pc;
+
+layout(location = 0) out vec4 outColor;
+
+void main(){
+    vec2 texSize = max(pc.u_texsize, vec2(1.0, 1.0));
+    vec2 invSize = max(pc.u_invsize, vec2(1.0 / texSize.x, 1.0 / texSize.y));
+    float dp = max(pc.u_dp, 0.0001);
+
+    vec2 T = v_texCoords;
+    vec2 coords = (T * texSize) + pc.u_offset;
+    T += vec2(
+        sin(coords.y / 3.0 + pc.u_time / 20.0),
+        sin(coords.x / 3.0 + pc.u_time / 20.0)
+    ) / texSize;
+
+    vec4 color = texture(u_texture, T);
+    vec4 maxed = max(
+        max(texture(u_texture, T + vec2(0.0, 2.0) * invSize), texture(u_texture, T + vec2(0.0, -2.0) * invSize)),
+        max(texture(u_texture, T + vec2(2.0, 0.0) * invSize), texture(u_texture, T + vec2(-2.0, 0.0) * invSize))
+    );
+
+    if(texture(u_texture, T).a < 0.9 && maxed.a > 0.9){
+        outColor = vec4(maxed.rgb, maxed.a * 100.0);
+    }else{
+        if(color.a > 0.0){
+            if(mod(
+                coords.x / dp +
+                coords.y / dp +
+                sin(coords.x / dp / 5.0) * 3.0 +
+                sin(coords.y / dp / 5.0) * 3.0 +
+                pc.u_time / 4.0,
+                10.0
+            ) < 2.0){
+                color *= 1.65;
+            }
+            color.a = 0.18;
+        }
+        outColor = color;
+    }
+}
+"""
+
+        private val buildBeamFragmentShaderSource = """
+#version 450
+layout(location = 2) in vec2 v_texCoords;
+
+layout(set = 0, binding = 0) uniform sampler2D u_texture;
+
+layout(push_constant) uniform Push {
+    mat4 u_projTrans;
+    vec2 u_texsize;
+    vec2 u_invsize;
+    float u_time;
+    float u_dp;
+    vec2 u_offset;
+} pc;
+
+layout(location = 0) out vec4 outColor;
+
+void main(){
+    vec2 texSize = max(pc.u_texsize, vec2(1.0, 1.0));
+    float dp = max(pc.u_dp, 0.0001);
+
+    vec2 T = v_texCoords;
+    vec2 coords = (T * texSize) + pc.u_offset;
+    vec4 color = texture(u_texture, T);
+
+    color.a *= (0.37 +
+                abs(sin(pc.u_time / 15.0)) * 0.05 +
+                0.2 * step(mod(coords.x / dp + coords.y / dp + pc.u_time / 4.0, 10.0), 3.0));
+    outColor = color;
 }
 """
 
