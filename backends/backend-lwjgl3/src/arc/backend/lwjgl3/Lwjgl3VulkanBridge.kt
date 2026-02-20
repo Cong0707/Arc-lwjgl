@@ -4,6 +4,7 @@ import arc.graphics.GL20
 import arc.graphics.GL30
 import arc.graphics.Vulkan
 import arc.graphics.vk.VkNative
+import arc.mock.MockGL30
 import arc.struct.IntIntMap
 import arc.struct.IntSeq
 import arc.util.Log
@@ -14,10 +15,13 @@ import java.nio.FloatBuffer
 import java.nio.IntBuffer
 import java.nio.ShortBuffer
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 
-internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), Vulkan{
+internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : MockGL30(), Vulkan{
     private val runtime: Lwjgl3VulkanRuntime?
     private val native: VkNative
     private var lastError = GL20.GL_NO_ERROR
@@ -57,6 +61,7 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
     private val colorScratch = FloatArray(4)
     private var vertexScratch = ByteBuffer.allocateDirect(1024).order(ByteOrder.nativeOrder())
     private var indexScratch = ByteBuffer.allocateDirect(1024).order(ByteOrder.nativeOrder())
+    private var textureUploadScratch = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder())
 
     private var traceFrameCounter = 0L
     private var traceDrawCallsThisFrame = 0
@@ -83,6 +88,16 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
     private var traceDecodedVerticesThisFrame = 0
     private var traceDecodedIndicesThisFrame = 0
     private var traceSubmitCpuNanosThisFrame = 0L
+    private var traceStencilWritePassThisFrame = 0
+    private var traceStencilReadPassThisFrame = 0
+    private var traceStencilClipAppliedThisFrame = 0
+    private var traceStencilDroppedThisFrame = 0
+    private var traceFlipFramebufferTextureThisFrame = 0
+    private var traceEffectDefaultThisFrame = 0
+    private var traceEffectShieldThisFrame = 0
+    private var traceEffectBuildBeamThisFrame = 0
+    private var traceFboDrawLogsThisFrame = 0
+    private var traceFboWriteLogsThisFrame = 0
     private var blendSrcColor = GL20.GL_ONE
     private var blendDstColor = GL20.GL_ZERO
     private var blendSrcAlpha = GL20.GL_ONE
@@ -93,6 +108,36 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
     private var blendColorG = 0f
     private var blendColorB = 0f
     private var blendColorA = 0f
+    private var colorMaskR = true
+    private var colorMaskG = true
+    private var colorMaskB = true
+    private var colorMaskA = true
+    private var viewportXState = 0
+    private var viewportYState = 0
+    private var viewportWidthState = 1
+    private var viewportHeightState = 1
+    private var scissorXState = 0
+    private var scissorYState = 0
+    private var scissorWidthState = 1
+    private var scissorHeightState = 1
+    private var scissorSetState = false
+    private var scissorEnabledState = false
+    private var stencilFuncState = GL20.GL_ALWAYS
+    private var stencilRefState = 0
+    private var stencilValueMaskState = 0xFF
+    private var stencilWriteMaskState = 0xFF
+    private var stencilOpFailState = GL20.GL_KEEP
+    private var stencilOpZFailState = GL20.GL_KEEP
+    private var stencilOpZPassState = GL20.GL_KEEP
+    private var stencilMaskValid = false
+    private var stencilMaskMinX = 0f
+    private var stencilMaskMinY = 0f
+    private var stencilMaskMaxX = 0f
+    private var stencilMaskMaxY = 0f
+    private var stencilMaskFramebuffer = Int.MIN_VALUE
+    private var stencilWriteActive = false
+    private var stencilWriteFramebuffer = Int.MIN_VALUE
+    private val clipScratch = FloatArray(2)
 
     init{
         vaos[0] = VertexArrayState(0)
@@ -123,6 +168,9 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
     }
 
     override fun beginFrame(){
+        clearStencilMaskBounds(Int.MIN_VALUE)
+        stencilWriteActive = false
+        stencilWriteFramebuffer = Int.MIN_VALUE
         if(traceEnabled){
             traceDrawCallsThisFrame = 0
             traceSubmitOkThisFrame = 0
@@ -148,6 +196,16 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
             traceDecodedVerticesThisFrame = 0
             traceDecodedIndicesThisFrame = 0
             traceSubmitCpuNanosThisFrame = 0L
+            traceStencilWritePassThisFrame = 0
+            traceStencilReadPassThisFrame = 0
+            traceStencilClipAppliedThisFrame = 0
+            traceStencilDroppedThisFrame = 0
+            traceFlipFramebufferTextureThisFrame = 0
+            traceEffectDefaultThisFrame = 0
+            traceEffectShieldThisFrame = 0
+            traceEffectBuildBeamThisFrame = 0
+            traceFboDrawLogsThisFrame = 0
+            traceFboWriteLogsThisFrame = 0
         }
         runtime?.beginFrame()
     }
@@ -159,7 +217,7 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
             if(traceFrameCounter % 60L == 0L){
                 val submitMs = traceSubmitCpuNanosThisFrame / 1_000_000.0
                 Log.info(
-                    "VkCompat frame @ glDraw=@ submit=@ proj(trans=@ view=@ m11+@ m11-@) decode(v=@ i=@ cpuMs=@) skip(noRuntime=@ mode=@ program=@ unlinked=@ attrib=@ [posLoc=@ posState=@ colLoc=@ colState=@ uvLoc=@ uvState=@] texture=@ fboTarget=@ fboTexture=@ read=@)",
+                    "VkCompat frame @ glDraw=@ submit=@ proj(trans=@ view=@ m11+@ m11-@) decode(v=@ i=@ cpuMs=@) stencil(write=@ read=@ clip=@ drop=@) flip(fboTex=@) fx(def=@ sh=@ bb=@) skip(noRuntime=@ mode=@ program=@ unlinked=@ attrib=@ [posLoc=@ posState=@ colLoc=@ colState=@ uvLoc=@ uvState=@] texture=@ fboTarget=@ fboTexture=@ read=@)",
                     traceFrameCounter,
                     traceDrawCallsThisFrame,
                     traceSubmitOkThisFrame,
@@ -170,6 +228,14 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
                     traceDecodedVerticesThisFrame,
                     traceDecodedIndicesThisFrame,
                     submitMs,
+                    traceStencilWritePassThisFrame,
+                    traceStencilReadPassThisFrame,
+                    traceStencilClipAppliedThisFrame,
+                    traceStencilDroppedThisFrame,
+                    traceFlipFramebufferTextureThisFrame,
+                    traceEffectDefaultThisFrame,
+                    traceEffectShieldThisFrame,
+                    traceEffectBuildBeamThisFrame,
                     traceSkipNoRuntime,
                     traceSkipMode,
                     traceSkipProgram,
@@ -241,11 +307,30 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
         params.put(params.position(), value)
     }
 
+    override fun glGetBooleanv(pname: Int, params: Buffer){
+        if(params !is ByteBuffer || params.remaining() <= 0) return
+        when(pname){
+            GL20.GL_COLOR_WRITEMASK -> {
+                if(params.remaining() < 4) return
+                val base = params.position()
+                params.put(base, if(colorMaskR) 1 else 0)
+                params.put(base + 1, if(colorMaskG) 1 else 0)
+                params.put(base + 2, if(colorMaskB) 1 else 0)
+                params.put(base + 3, if(colorMaskA) 1 else 0)
+            }
+        }
+    }
+
     override fun glClearColor(red: Float, green: Float, blue: Float, alpha: Float){
         runtime?.setClearColor(red, green, blue, alpha)
     }
 
     override fun glClear(mask: Int){
+        if((mask and GL20.GL_STENCIL_BUFFER_BIT) != 0){
+            clearStencilMaskBounds(currentFramebuffer)
+            stencilWriteActive = false
+            stencilWriteFramebuffer = Int.MIN_VALUE
+        }
         runtime?.clear(mask)
     }
 
@@ -307,7 +392,7 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
         if(textureId == 0) return
         if(width <= 0 || height <= 0) return
 
-        if(format != GL20.GL_RGBA || type != GL20.GL_UNSIGNED_BYTE){
+        if(!canUploadTextureFormat(format, type)){
             setError(GL20.GL_INVALID_ENUM)
             return
         }
@@ -318,13 +403,7 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
         tex.internalFormat = internalformat
         tex.format = format
         tex.type = type
-        val upload = if(pixels != null){
-            val copied = copyToByteBuffer(pixels, width * height * 4)
-            copied.position(0)
-            copied
-        }else{
-            null
-        }
+        val upload = convertTextureToRgba(format, type, width, height, pixels)
         runtime?.uploadTexture(textureId, width, height, upload, tex.minFilter, tex.magFilter, tex.wrapS, tex.wrapT)
         syncFramebufferAttachmentsForTexture(textureId)
     }
@@ -341,7 +420,7 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
         pixels: Buffer?
     ){
         if(level != 0 || target != GL20.GL_TEXTURE_2D) return
-        if(format != GL20.GL_RGBA || type != GL20.GL_UNSIGNED_BYTE){
+        if(!canUploadTextureFormat(format, type)){
             setError(GL20.GL_INVALID_ENUM)
             return
         }
@@ -351,13 +430,7 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
         if(width <= 0 || height <= 0) return
         if(xoffset < 0 || yoffset < 0 || xoffset + width > tex.width || yoffset + height > tex.height) return
 
-        val upload = if(pixels != null){
-            val copied = copyToByteBuffer(pixels, width * height * 4)
-            copied.position(0)
-            copied
-        }else{
-            null
-        }
+        val upload = convertTextureToRgba(format, type, width, height, pixels)
         runtime?.uploadTextureSubImage(
             textureId,
             xoffset,
@@ -569,6 +642,9 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
         p.uniforms.clear()
         p.attribLocations.clear()
         p.uniformLocations.clear()
+        p.uniformInts.clear()
+        p.uniformFloats.clear()
+        p.uniformMat4.clear()
 
         for(shaderId in p.shaders){
             val shader = shaders[shaderId]
@@ -586,6 +662,7 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
             p.infoLog = "Missing fragment shader."
             return
         }
+        p.effectKind = detectProgramEffect(fragment)
 
         val usedLocations = HashSet<Int>()
         var nextLocation = 0
@@ -680,7 +757,98 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
 
     override fun glUniform1i(location: Int, x: Int){
         if(location < 0) return
-        currentProgramState()?.uniformInts?.put(location, x)
+        val program = currentProgramState() ?: return
+        program.uniformInts[location] = x
+        program.uniformFloats.remove(location)
+    }
+
+    override fun glUniform2i(location: Int, x: Int, y: Int){
+        if(location < 0) return
+        val program = currentProgramState() ?: return
+        program.uniformInts[location] = x
+        program.uniformFloats[location] = floatArrayOf(x.toFloat(), y.toFloat())
+    }
+
+    override fun glUniform3i(location: Int, x: Int, y: Int, z: Int){
+        if(location < 0) return
+        val program = currentProgramState() ?: return
+        program.uniformInts[location] = x
+        program.uniformFloats[location] = floatArrayOf(x.toFloat(), y.toFloat(), z.toFloat())
+    }
+
+    override fun glUniform4i(location: Int, x: Int, y: Int, z: Int, w: Int){
+        if(location < 0) return
+        val program = currentProgramState() ?: return
+        program.uniformInts[location] = x
+        program.uniformFloats[location] = floatArrayOf(x.toFloat(), y.toFloat(), z.toFloat(), w.toFloat())
+    }
+
+    override fun glUniform1f(location: Int, x: Float){
+        if(location < 0) return
+        currentProgramState()?.uniformFloats?.put(location, floatArrayOf(x))
+    }
+
+    override fun glUniform2f(location: Int, x: Float, y: Float){
+        if(location < 0) return
+        currentProgramState()?.uniformFloats?.put(location, floatArrayOf(x, y))
+    }
+
+    override fun glUniform3f(location: Int, x: Float, y: Float, z: Float){
+        if(location < 0) return
+        currentProgramState()?.uniformFloats?.put(location, floatArrayOf(x, y, z))
+    }
+
+    override fun glUniform4f(location: Int, x: Float, y: Float, z: Float, w: Float){
+        if(location < 0) return
+        currentProgramState()?.uniformFloats?.put(location, floatArrayOf(x, y, z, w))
+    }
+
+    override fun glUniform1fv(location: Int, count: Int, values: FloatArray, offset: Int){
+        if(location < 0 || count <= 0 || offset < 0 || offset >= values.size) return
+        glUniform1f(location, values[offset])
+    }
+
+    override fun glUniform2fv(location: Int, count: Int, values: FloatArray, offset: Int){
+        if(location < 0 || count <= 0 || offset < 0 || offset + 1 >= values.size) return
+        glUniform2f(location, values[offset], values[offset + 1])
+    }
+
+    override fun glUniform3fv(location: Int, count: Int, values: FloatArray, offset: Int){
+        if(location < 0 || count <= 0 || offset < 0 || offset + 2 >= values.size) return
+        glUniform3f(location, values[offset], values[offset + 1], values[offset + 2])
+    }
+
+    override fun glUniform4fv(location: Int, count: Int, values: FloatArray, offset: Int){
+        if(location < 0 || count <= 0 || offset < 0 || offset + 3 >= values.size) return
+        glUniform4f(location, values[offset], values[offset + 1], values[offset + 2], values[offset + 3])
+    }
+
+    override fun glUniform1fv(location: Int, count: Int, values: FloatBuffer){
+        if(location < 0 || count <= 0) return
+        val src = values.duplicate()
+        if(src.remaining() <= 0) return
+        glUniform1f(location, src.get())
+    }
+
+    override fun glUniform2fv(location: Int, count: Int, values: FloatBuffer){
+        if(location < 0 || count <= 0) return
+        val src = values.duplicate()
+        if(src.remaining() < 2) return
+        glUniform2f(location, src.get(), src.get())
+    }
+
+    override fun glUniform3fv(location: Int, count: Int, values: FloatBuffer){
+        if(location < 0 || count <= 0) return
+        val src = values.duplicate()
+        if(src.remaining() < 3) return
+        glUniform3f(location, src.get(), src.get(), src.get())
+    }
+
+    override fun glUniform4fv(location: Int, count: Int, values: FloatBuffer){
+        if(location < 0 || count <= 0) return
+        val src = values.duplicate()
+        if(src.remaining() < 4) return
+        glUniform4f(location, src.get(), src.get(), src.get(), src.get())
     }
 
     override fun glUniformMatrix4fv(location: Int, count: Int, transpose: Boolean, value: FloatBuffer){
@@ -713,6 +881,11 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
         if(framebufferColorAttachments.remove(framebuffer) != null){
             rebuildFramebufferTextureSet()
         }
+        clearStencilMaskBounds(framebuffer)
+        if(stencilWriteFramebuffer == framebuffer){
+            stencilWriteActive = false
+            stencilWriteFramebuffer = Int.MIN_VALUE
+        }
         runtime?.removeFramebuffer(framebuffer)
         if(currentFramebuffer == framebuffer){
             currentFramebuffer = 0
@@ -721,6 +894,10 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
     }
 
     override fun glBindFramebuffer(target: Int, framebuffer: Int){
+        if(currentFramebuffer != framebuffer){
+            stencilWriteActive = false
+            stencilWriteFramebuffer = Int.MIN_VALUE
+        }
         currentFramebuffer = framebuffer
         if(framebuffer != 0) framebuffers.add(framebuffer)
         runtime?.setCurrentFramebuffer(framebuffer)
@@ -739,6 +916,16 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
             runtime?.setFramebufferColorAttachment(fb, texture, tex?.width ?: 0, tex?.height ?: 0)
         }
         rebuildFramebufferTextureSet()
+    }
+
+    override fun glFramebufferRenderbuffer(target: Int, attachment: Int, renderbuffertarget: Int, renderbuffer: Int){
+        // No-op: stencil/renderbuffer attachments are currently not represented in the Vulkan
+        // compat resource graph.
+    }
+
+    override fun glCheckFramebufferStatus(target: Int): Int{
+        if(target != GL20.GL_FRAMEBUFFER) return GL20.GL_FRAMEBUFFER_COMPLETE
+        return GL20.GL_FRAMEBUFFER_COMPLETE
     }
 
     override fun glIsFramebuffer(framebuffer: Int): Boolean{
@@ -766,29 +953,81 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
     }
 
     override fun glViewport(x: Int, y: Int, width: Int, height: Int){
+        viewportXState = x
+        viewportYState = y
+        viewportWidthState = max(1, width)
+        viewportHeightState = max(1, height)
         runtime?.setViewport(x, y, width, height)
     }
 
     override fun glScissor(x: Int, y: Int, width: Int, height: Int){
+        scissorXState = x
+        scissorYState = y
+        scissorWidthState = max(1, width)
+        scissorHeightState = max(1, height)
+        scissorSetState = true
         runtime?.setScissor(x, y, width, height)
+    }
+
+    override fun glColorMask(red: Boolean, green: Boolean, blue: Boolean, alpha: Boolean){
+        colorMaskR = red
+        colorMaskG = green
+        colorMaskB = blue
+        colorMaskA = alpha
     }
 
     override fun glEnable(cap: Int){
         enabledCaps.add(cap)
         if(cap == GL20.GL_SCISSOR_TEST){
+            scissorEnabledState = true
             runtime?.setScissorEnabled(true)
+        }else if(cap == GL20.GL_STENCIL_TEST){
+            stencilWriteActive = false
+            stencilWriteFramebuffer = Int.MIN_VALUE
         }
     }
 
     override fun glDisable(cap: Int){
         enabledCaps.remove(cap)
         if(cap == GL20.GL_SCISSOR_TEST){
+            scissorEnabledState = false
             runtime?.setScissorEnabled(false)
+        }else if(cap == GL20.GL_STENCIL_TEST){
+            stencilWriteActive = false
+            stencilWriteFramebuffer = Int.MIN_VALUE
         }
     }
 
     override fun glIsEnabled(cap: Int): Boolean{
         return enabledCaps.contains(cap)
+    }
+
+    override fun glStencilFunc(func: Int, ref: Int, mask: Int){
+        stencilFuncState = func
+        stencilRefState = ref
+        stencilValueMaskState = mask
+    }
+
+    override fun glStencilMask(mask: Int){
+        stencilWriteMaskState = mask
+    }
+
+    override fun glStencilOp(fail: Int, zfail: Int, zpass: Int){
+        stencilOpFailState = fail
+        stencilOpZFailState = zfail
+        stencilOpZPassState = zpass
+    }
+
+    override fun glStencilFuncSeparate(face: Int, func: Int, ref: Int, mask: Int){
+        glStencilFunc(func, ref, mask)
+    }
+
+    override fun glStencilMaskSeparate(face: Int, mask: Int){
+        glStencilMask(mask)
+    }
+
+    override fun glStencilOpSeparate(face: Int, fail: Int, zfail: Int, zpass: Int){
+        glStencilOp(fail, zfail, zpass)
     }
 
     override fun glBlendFunc(sfactor: Int, dfactor: Int){
@@ -918,9 +1157,38 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
 
         val texUnit = program.uniformInts[program.uniformLocations["u_texture"] ?: -1] ?: 0
         val textureId = if(texUnit in 0 until maxTextureUnits) textureUnits[texUnit] else 0
-        val flipFramebufferTextureV = framebufferTextures.contains(textureId)
-
+        val texState = textures[textureId]
+        val usesProjectionUniform = hasProjectionUniform(program)
         val proj = resolveProjection(program)
+        // Small offscreen buffers (e.g. menu shadow caches) still need explicit V-flip on sampling
+        // to match legacy GL framebuffer texture orientation.
+        val smallFramebufferSample = texState != null && texState.width in 1..160 && texState.height in 1..90
+        val flipFramebufferTextureV = framebufferTextures.contains(textureId)
+            && ((!usesProjectionUniform || isIdentityProjection(proj)) || smallFramebufferSample)
+        if(traceEnabled && flipFramebufferTextureV){
+            traceFlipFramebufferTextureThisFrame++
+        }
+
+        val colorMaskedOut = !colorMaskR && !colorMaskG && !colorMaskB && !colorMaskA
+        val stencilWritePass = isStencilWritePass(colorMaskedOut)
+        if(stencilWritePass && (!stencilWriteActive || stencilWriteFramebuffer != currentFramebuffer)){
+            clearStencilMaskBounds(currentFramebuffer)
+            stencilWriteActive = true
+            stencilWriteFramebuffer = currentFramebuffer
+        }else if(!stencilWritePass){
+            stencilWriteActive = false
+            stencilWriteFramebuffer = Int.MIN_VALUE
+        }
+        val stencilReadPass = isStencilReadPass(colorMaskedOut, stencilWritePass)
+
+        if(colorMaskedOut && !stencilWritePass){
+            // No color output expected and this draw is not contributing to stencil mask.
+            if(traceEnabled && stencilReadPass){
+                traceStencilDroppedThisFrame++
+            }
+            return
+        }
+
         if(traceEnabled){
             if(proj[5] >= 0f) traceProjM11Pos++ else traceProjM11Neg++
         }
@@ -961,6 +1229,14 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
         val outVertices = vertexScratch.duplicate().order(ByteOrder.nativeOrder())
         outVertices.clear()
         outVertices.limit(uniqueCount * spriteStride)
+        var minX = Float.POSITIVE_INFINITY
+        var minY = Float.POSITIVE_INFINITY
+        var maxX = Float.NEGATIVE_INFINITY
+        var maxY = Float.NEGATIVE_INFINITY
+        var minU = Float.POSITIVE_INFINITY
+        var minV = Float.POSITIVE_INFINITY
+        var maxU = Float.NEGATIVE_INFINITY
+        var maxV = Float.NEGATIVE_INFINITY
 
         for(i in 0 until uniqueCount){
             val index = uniqueVertices.items[i]
@@ -984,11 +1260,122 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
             outVertices.putFloat(posScratch[1])
             outVertices.putInt(c)
             outVertices.putFloat(uvScratch[0])
-            outVertices.putFloat(if(flipFramebufferTextureV) 1f - uvScratch[1] else uvScratch[1])
+            val submittedV = if(flipFramebufferTextureV) 1f - uvScratch[1] else uvScratch[1]
+            outVertices.putFloat(submittedV)
             outVertices.putInt(m)
+            if(posScratch[0] < minX) minX = posScratch[0]
+            if(posScratch[0] > maxX) maxX = posScratch[0]
+            if(posScratch[1] < minY) minY = posScratch[1]
+            if(posScratch[1] > maxY) maxY = posScratch[1]
+            if(uvScratch[0] < minU) minU = uvScratch[0]
+            if(uvScratch[0] > maxU) maxU = uvScratch[0]
+            if(submittedV < minV) minV = submittedV
+            if(submittedV > maxV) maxV = submittedV
+
+            if(stencilWritePass){
+                accumulateStencilMaskBounds(posScratch[0], posScratch[1], proj)
+            }
         }
         outVertices.flip()
 
+        if(stencilWritePass){
+            if(traceEnabled) traceStencilWritePassThisFrame++
+            return
+        }
+
+        val appliedStencilClip = if(stencilReadPass){
+            if(traceEnabled) traceStencilReadPassThisFrame++
+            val pushed = pushStencilClip()
+            if(!pushed){
+                if(traceEnabled) traceStencilDroppedThisFrame++
+                return
+            }
+            if(traceEnabled) traceStencilClipAppliedThisFrame++
+            true
+        }else{
+            false
+        }
+        val shaderVariant = when(program.effectKind){
+            ProgramEffectKind.Shield -> Lwjgl3VulkanRuntime.SpriteShaderVariant.Shield
+            ProgramEffectKind.BuildBeam -> Lwjgl3VulkanRuntime.SpriteShaderVariant.BuildBeam
+            else -> Lwjgl3VulkanRuntime.SpriteShaderVariant.Default
+        }
+        if(traceEnabled){
+            when(program.effectKind){
+                ProgramEffectKind.Shield -> traceEffectShieldThisFrame++
+                ProgramEffectKind.BuildBeam -> traceEffectBuildBeamThisFrame++
+                ProgramEffectKind.Default -> traceEffectDefaultThisFrame++
+            }
+        }
+        val effectUniforms = when(program.effectKind){
+            ProgramEffectKind.Shield, ProgramEffectKind.BuildBeam -> buildEffectUniforms(program, textureId)
+            else -> null
+        }
+        if(traceEnabled
+            && framebufferTextures.contains(textureId)
+            && traceFboDrawLogsThisFrame < 2
+            && (traceFrameCounter % 60L == 0L)){
+            traceFboDrawLogsThisFrame++
+            val tex = texState
+            Log.info(
+                "VkCompat fboDraw frame=@ prog=@ tex=@ texSize=@x@ flip=@ projU=@ ident=@ m00=@ m11=@ m30=@ m31=@ bounds=[@,@]-[@,@] uv=[@,@]-[@,@] fb=@",
+                traceFrameCounter,
+                program.id,
+                textureId,
+                tex?.width ?: 0,
+                tex?.height ?: 0,
+                flipFramebufferTextureV,
+                usesProjectionUniform,
+                isIdentityProjection(proj),
+                proj[0],
+                proj[5],
+                proj[12],
+                proj[13],
+                minX,
+                minY,
+                maxX,
+                maxY,
+                minU,
+                minV,
+                maxU,
+                maxV,
+                currentFramebuffer
+            )
+        }
+        val attachmentTexture = framebufferColorAttachments[currentFramebuffer] ?: 0
+        val attachmentState = textures[attachmentTexture]
+        val attachmentWidth = attachmentState?.width ?: 0
+        val attachmentHeight = attachmentState?.height ?: 0
+        val traceSmallFboWrite = attachmentWidth in 1..160 && attachmentHeight in 1..90
+        val traceFboWriteWindow = traceFrameCounter < 10L || traceSmallFboWrite
+        if(traceEnabled
+            && currentFramebuffer != 0
+            && traceFboWriteWindow
+            && traceFboWriteLogsThisFrame < (if(traceSmallFboWrite) 8 else 20)){
+            traceFboWriteLogsThisFrame++
+            Log.info(
+                "VkCompat fboWrite frame=@ fb=@ attTex=@ attSize=@x@ projU=@ ident=@ m00=@ m11=@ m30=@ m31=@ bounds=[@,@]-[@,@] uv=[@,@]-[@,@]",
+                traceFrameCounter,
+                currentFramebuffer,
+                attachmentTexture,
+                attachmentWidth,
+                attachmentHeight,
+                usesProjectionUniform,
+                isIdentityProjection(proj),
+                proj[0],
+                proj[5],
+                proj[12],
+                proj[13],
+                minX,
+                minY,
+                maxX,
+                maxY,
+                minU,
+                minV,
+                maxU,
+                maxV
+            )
+        }
         vk.drawSprite(
             outVertices,
             uniqueCount,
@@ -996,6 +1383,8 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
             triangleCount,
             textureId,
             proj,
+            shaderVariant,
+            effectUniforms,
             enabledCaps.contains(GL20.GL_BLEND),
             blendSrcColor,
             blendDstColor,
@@ -1008,6 +1397,9 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
             blendColorB,
             blendColorA
         )
+        if(appliedStencilClip){
+            popStencilClip()
+        }
         if(traceEnabled){
             traceSubmitOkThisFrame++
             traceDecodedVerticesThisFrame += uniqueCount
@@ -1078,6 +1470,176 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
             ?: program.uniformLocations["u_projView"]
             ?: -1
         return program.uniformMat4[projLocation] ?: identity
+    }
+
+    private fun hasProjectionUniform(program: ProgramState): Boolean{
+        return program.uniformLocations.containsKey("u_projTrans")
+            || program.uniformLocations.containsKey("u_projectionViewMatrix")
+            || program.uniformLocations.containsKey("u_proj")
+            || program.uniformLocations.containsKey("u_mat")
+            || program.uniformLocations.containsKey("u_projection")
+            || program.uniformLocations.containsKey("u_projectionView")
+            || program.uniformLocations.containsKey("u_projView")
+    }
+
+    private fun uniformFloat(program: ProgramState, name: String, fallback: Float): Float{
+        val location = program.uniformLocations[name] ?: return fallback
+        val value = program.uniformFloats[location] ?: return fallback
+        return value.getOrNull(0) ?: fallback
+    }
+
+    private fun uniformVec2(program: ProgramState, name: String, fallbackX: Float, fallbackY: Float): FloatArray{
+        val location = program.uniformLocations[name] ?: return floatArrayOf(fallbackX, fallbackY)
+        val value = program.uniformFloats[location] ?: return floatArrayOf(fallbackX, fallbackY)
+        val x = value.getOrNull(0) ?: fallbackX
+        val y = value.getOrNull(1) ?: fallbackY
+        return floatArrayOf(x, y)
+    }
+
+    private fun buildEffectUniforms(program: ProgramState, textureId: Int): Lwjgl3VulkanRuntime.EffectUniforms{
+        val tex = textures[textureId]
+        val texWidth = max(1, tex?.width ?: viewportWidthState).toFloat()
+        val texHeight = max(1, tex?.height ?: viewportHeightState).toFloat()
+
+        val texSize = uniformVec2(program, "u_texsize", texWidth, texHeight)
+        val invSizeDefaultX = if(abs(texSize[0]) > 1e-6f) 1f / texSize[0] else 1f / texWidth
+        val invSizeDefaultY = if(abs(texSize[1]) > 1e-6f) 1f / texSize[1] else 1f / texHeight
+        val invSize = uniformVec2(program, "u_invsize", invSizeDefaultX, invSizeDefaultY)
+        val offset = uniformVec2(program, "u_offset", 0f, 0f)
+        val time = uniformFloat(program, "u_time", 0f)
+        val dp = max(1e-4f, uniformFloat(program, "u_dp", 1f))
+
+        return Lwjgl3VulkanRuntime.EffectUniforms(
+            texWidth = texSize[0],
+            texHeight = texSize[1],
+            invWidth = invSize[0],
+            invHeight = invSize[1],
+            time = time,
+            dp = dp,
+            offsetX = offset[0],
+            offsetY = offset[1]
+        )
+    }
+
+    private fun isIdentityProjection(matrix: FloatArray): Boolean{
+        if(matrix.size < 16) return false
+        val eps = 1e-5f
+        for(i in 0 until 16){
+            val target = identity[i]
+            if(abs(matrix[i] - target) > eps){
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun isStencilWritePass(colorMaskedOut: Boolean): Boolean{
+        if(!enabledCaps.contains(GL20.GL_STENCIL_TEST)) return false
+        if(!colorMaskedOut) return false
+        if(stencilWriteMaskState == 0) return false
+        return hasStencilWriteOperation()
+    }
+
+    private fun isStencilReadPass(colorMaskedOut: Boolean, stencilWritePass: Boolean): Boolean{
+        if(!enabledCaps.contains(GL20.GL_STENCIL_TEST)) return false
+        if(stencilWritePass) return false
+        if(colorMaskedOut) return false
+        return stencilFuncState != GL20.GL_ALWAYS
+    }
+
+    private fun hasStencilWriteOperation(): Boolean{
+        return stencilOpFailState != GL20.GL_KEEP
+            || stencilOpZFailState != GL20.GL_KEEP
+            || stencilOpZPassState != GL20.GL_KEEP
+    }
+
+    private fun clearStencilMaskBounds(framebuffer: Int = currentFramebuffer){
+        if(framebuffer != Int.MIN_VALUE && stencilMaskFramebuffer != framebuffer){
+            return
+        }
+        stencilMaskValid = false
+        stencilMaskMinX = 0f
+        stencilMaskMinY = 0f
+        stencilMaskMaxX = 0f
+        stencilMaskMaxY = 0f
+        stencilMaskFramebuffer = Int.MIN_VALUE
+    }
+
+    private fun accumulateStencilMaskBounds(x: Float, y: Float, proj: FloatArray){
+        if(!projectToWindow(x, y, proj, clipScratch)) return
+        val sx = clipScratch[0]
+        val sy = clipScratch[1]
+        if(stencilMaskFramebuffer != currentFramebuffer){
+            clearStencilMaskBounds(Int.MIN_VALUE)
+            stencilMaskFramebuffer = currentFramebuffer
+        }
+        if(!stencilMaskValid){
+            stencilMaskValid = true
+            stencilMaskMinX = sx
+            stencilMaskMinY = sy
+            stencilMaskMaxX = sx
+            stencilMaskMaxY = sy
+        }else{
+            if(sx < stencilMaskMinX) stencilMaskMinX = sx
+            if(sy < stencilMaskMinY) stencilMaskMinY = sy
+            if(sx > stencilMaskMaxX) stencilMaskMaxX = sx
+            if(sy > stencilMaskMaxY) stencilMaskMaxY = sy
+        }
+    }
+
+    private fun projectToWindow(x: Float, y: Float, proj: FloatArray, out: FloatArray): Boolean{
+        val clipX = proj[0] * x + proj[4] * y + proj[12]
+        val clipY = proj[1] * x + proj[5] * y + proj[13]
+        val clipW = proj[3] * x + proj[7] * y + proj[15]
+        if(abs(clipW) < 1e-6f) return false
+
+        val ndcX = clipX / clipW
+        val ndcY = clipY / clipW
+        val vx = viewportXState.toFloat()
+        val vy = viewportYState.toFloat()
+        val vw = max(1, viewportWidthState).toFloat()
+        val vh = max(1, viewportHeightState).toFloat()
+
+        out[0] = vx + (ndcX * 0.5f + 0.5f) * vw
+        out[1] = vy + (ndcY * 0.5f + 0.5f) * vh
+        return true
+    }
+
+    private fun pushStencilClip(): Boolean{
+        if(stencilMaskFramebuffer != currentFramebuffer) return false
+        if(!stencilMaskValid) return false
+
+        var clipX = floor(stencilMaskMinX).toInt()
+        var clipY = floor(stencilMaskMinY).toInt()
+        var clipMaxX = ceil(stencilMaskMaxX).toInt()
+        var clipMaxY = ceil(stencilMaskMaxY).toInt()
+        if(clipMaxX <= clipX || clipMaxY <= clipY) return false
+
+        if(scissorEnabledState){
+            val sx = if(scissorSetState) scissorXState else viewportXState
+            val sy = if(scissorSetState) scissorYState else viewportYState
+            val sw = if(scissorSetState) max(1, scissorWidthState) else max(1, viewportWidthState)
+            val sh = if(scissorSetState) max(1, scissorHeightState) else max(1, viewportHeightState)
+            val sMaxX = sx + sw
+            val sMaxY = sy + sh
+
+            clipX = max(clipX, sx)
+            clipY = max(clipY, sy)
+            clipMaxX = min(clipMaxX, sMaxX)
+            clipMaxY = min(clipMaxY, sMaxY)
+            if(clipMaxX <= clipX || clipMaxY <= clipY) return false
+        }
+
+        runtime?.setScissor(clipX, clipY, max(1, clipMaxX - clipX), max(1, clipMaxY - clipY))
+        runtime?.setScissorEnabled(true)
+        return true
+    }
+
+    private fun popStencilClip(){
+        if(scissorSetState){
+            runtime?.setScissor(scissorXState, scissorYState, scissorWidthState, scissorHeightState)
+        }
+        runtime?.setScissorEnabled(scissorEnabledState)
     }
 
     private fun readColor(attrib: VertexAttribState?, vertex: Int, fallback: Int): Int?{
@@ -1450,11 +2012,184 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
         }
     }
 
-    private fun copyToByteBuffer(source: Buffer?, bytes: Int): ByteBuffer{
-        val size = max(0, bytes)
-        val out = ByteBuffer.allocateDirect(size).order(ByteOrder.nativeOrder())
-        writeToByteBuffer(source, size, out)
+    private fun canUploadTextureFormat(format: Int, type: Int): Boolean{
+        return when(format){
+            GL20.GL_RGBA -> type == GL20.GL_UNSIGNED_BYTE
+                || type == GL20.GL_UNSIGNED_SHORT_4_4_4_4
+                || type == GL20.GL_UNSIGNED_SHORT_5_5_5_1
+            GL20.GL_RGB -> type == GL20.GL_UNSIGNED_BYTE
+                || type == GL20.GL_UNSIGNED_SHORT_5_6_5
+            GL20.GL_ALPHA, GL20.GL_LUMINANCE, GL20.GL_LUMINANCE_ALPHA -> type == GL20.GL_UNSIGNED_BYTE
+            else -> false
+        }
+    }
+
+    private fun convertTextureToRgba(format: Int, type: Int, width: Int, height: Int, pixels: Buffer?): ByteBuffer?{
+        if(pixels == null) return null
+        val safeWidth = max(0, width)
+        val safeHeight = max(0, height)
+        val pixelCount = safeWidth * safeHeight
+        if(pixelCount == 0){
+            return prepareTextureUpload(pixels, 0)
+        }
+
+        if(format == GL20.GL_RGBA && type == GL20.GL_UNSIGNED_BYTE){
+            return prepareTextureUpload(pixels, pixelCount * 4)
+        }
+
+        val out = ByteBuffer.allocateDirect(pixelCount * 4).order(ByteOrder.nativeOrder())
+
+        when{
+            format == GL20.GL_RGB && type == GL20.GL_UNSIGNED_BYTE -> {
+                val src = prepareTextureUpload(pixels, pixelCount * 3) ?: return null
+                for(i in 0 until pixelCount){
+                    val srcIndex = i * 3
+                    val dstIndex = i * 4
+                    out.put(dstIndex, src.get(srcIndex))
+                    out.put(dstIndex + 1, src.get(srcIndex + 1))
+                    out.put(dstIndex + 2, src.get(srcIndex + 2))
+                    out.put(dstIndex + 3, 0xFF.toByte())
+                }
+            }
+            format == GL20.GL_RGB && type == GL20.GL_UNSIGNED_SHORT_5_6_5 -> {
+                val src = prepareTextureUpload(pixels, pixelCount * 2) ?: return null
+                for(i in 0 until pixelCount){
+                    val packed = src.getShort(i * 2).toInt() and 0xFFFF
+                    val r = ((packed ushr 11) and 0x1F) * 255 / 31
+                    val g = ((packed ushr 5) and 0x3F) * 255 / 63
+                    val b = (packed and 0x1F) * 255 / 31
+                    val dstIndex = i * 4
+                    out.put(dstIndex, r.toByte())
+                    out.put(dstIndex + 1, g.toByte())
+                    out.put(dstIndex + 2, b.toByte())
+                    out.put(dstIndex + 3, 0xFF.toByte())
+                }
+            }
+            format == GL20.GL_RGBA && type == GL20.GL_UNSIGNED_SHORT_4_4_4_4 -> {
+                val src = prepareTextureUpload(pixels, pixelCount * 2) ?: return null
+                for(i in 0 until pixelCount){
+                    val packed = src.getShort(i * 2).toInt() and 0xFFFF
+                    val r = ((packed ushr 12) and 0xF) * 17
+                    val g = ((packed ushr 8) and 0xF) * 17
+                    val b = ((packed ushr 4) and 0xF) * 17
+                    val a = (packed and 0xF) * 17
+                    val dstIndex = i * 4
+                    out.put(dstIndex, r.toByte())
+                    out.put(dstIndex + 1, g.toByte())
+                    out.put(dstIndex + 2, b.toByte())
+                    out.put(dstIndex + 3, a.toByte())
+                }
+            }
+            format == GL20.GL_RGBA && type == GL20.GL_UNSIGNED_SHORT_5_5_5_1 -> {
+                val src = prepareTextureUpload(pixels, pixelCount * 2) ?: return null
+                for(i in 0 until pixelCount){
+                    val packed = src.getShort(i * 2).toInt() and 0xFFFF
+                    val r = ((packed ushr 11) and 0x1F) * 255 / 31
+                    val g = ((packed ushr 6) and 0x1F) * 255 / 31
+                    val b = ((packed ushr 1) and 0x1F) * 255 / 31
+                    val a = if((packed and 0x1) != 0) 255 else 0
+                    val dstIndex = i * 4
+                    out.put(dstIndex, r.toByte())
+                    out.put(dstIndex + 1, g.toByte())
+                    out.put(dstIndex + 2, b.toByte())
+                    out.put(dstIndex + 3, a.toByte())
+                }
+            }
+            format == GL20.GL_ALPHA && type == GL20.GL_UNSIGNED_BYTE -> {
+                val src = prepareTextureUpload(pixels, pixelCount) ?: return null
+                for(i in 0 until pixelCount){
+                    val a = src.get(i)
+                    val dstIndex = i * 4
+                    out.put(dstIndex, 0)
+                    out.put(dstIndex + 1, 0)
+                    out.put(dstIndex + 2, 0)
+                    out.put(dstIndex + 3, a)
+                }
+            }
+            format == GL20.GL_LUMINANCE && type == GL20.GL_UNSIGNED_BYTE -> {
+                val src = prepareTextureUpload(pixels, pixelCount) ?: return null
+                for(i in 0 until pixelCount){
+                    val l = src.get(i)
+                    val dstIndex = i * 4
+                    out.put(dstIndex, l)
+                    out.put(dstIndex + 1, l)
+                    out.put(dstIndex + 2, l)
+                    out.put(dstIndex + 3, 0xFF.toByte())
+                }
+            }
+            format == GL20.GL_LUMINANCE_ALPHA && type == GL20.GL_UNSIGNED_BYTE -> {
+                val src = prepareTextureUpload(pixels, pixelCount * 2) ?: return null
+                for(i in 0 until pixelCount){
+                    val srcIndex = i * 2
+                    val l = src.get(srcIndex)
+                    val a = src.get(srcIndex + 1)
+                    val dstIndex = i * 4
+                    out.put(dstIndex, l)
+                    out.put(dstIndex + 1, l)
+                    out.put(dstIndex + 2, l)
+                    out.put(dstIndex + 3, a)
+                }
+            }
+            else -> return null
+        }
+
+        out.position(0)
+        out.limit(pixelCount * 4)
         return out
+    }
+
+    private fun prepareTextureUpload(source: Buffer?, bytes: Int): ByteBuffer?{
+        if(source == null) return null
+        val size = max(0, bytes)
+        if(size == 0){
+            val empty = ensureTextureUploadScratch(0)
+            empty.position(0)
+            empty.limit(0)
+            return empty
+        }
+
+        if(source is ByteBuffer){
+            val view = source.duplicate().order(ByteOrder.nativeOrder())
+            val available = view.remaining()
+            if(available >= size){
+                val oldLimit = view.limit()
+                view.limit(view.position() + size)
+                val sliced = view.slice().order(ByteOrder.nativeOrder())
+                view.limit(oldLimit)
+                return sliced
+            }
+        }
+
+        val out = ensureTextureUploadScratch(size)
+        writeToByteBuffer(source, size, out)
+        out.position(0)
+        out.limit(size)
+        return out
+    }
+
+    private fun ensureTextureUploadScratch(requiredBytes: Int): ByteBuffer{
+        if(requiredBytes <= textureUploadScratch.capacity()){
+            return textureUploadScratch
+        }
+        val newCapacity = nextPow2(max(requiredBytes, 1024))
+        textureUploadScratch = ByteBuffer.allocateDirect(newCapacity).order(ByteOrder.nativeOrder())
+        return textureUploadScratch
+    }
+
+    private fun detectProgramEffect(fragmentSource: String): ProgramEffectKind{
+        val source = fragmentSource.lowercase()
+        val hasShieldUniforms = source.contains("u_invsize")
+            && source.contains("u_texsize")
+            && source.contains("u_dp")
+            && source.contains("u_offset")
+        if(hasShieldUniforms){
+            return if(source.contains("maxed") || source.contains("max(max(max(")){
+                ProgramEffectKind.Shield
+            }else{
+                ProgramEffectKind.BuildBeam
+            }
+        }
+        return ProgramEffectKind.Default
     }
 
     private fun mapType(name: String): Int{
@@ -1543,7 +2278,9 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
         val attribLocations: MutableMap<String, Int> = LinkedHashMap(),
         val uniformLocations: MutableMap<String, Int> = LinkedHashMap(),
         val uniformInts: MutableMap<Int, Int> = HashMap(),
+        val uniformFloats: MutableMap<Int, FloatArray> = HashMap(),
         val uniformMat4: MutableMap<Int, FloatArray> = HashMap(),
+        var effectKind: ProgramEffectKind = ProgramEffectKind.Default,
         var linked: Boolean = false,
         var infoLog: String = ""
     )
@@ -1588,6 +2325,12 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : Lwjgl3NoopGL30(), V
                 else -> 4
             }
         }
+    }
+
+    private enum class ProgramEffectKind{
+        Default,
+        Shield,
+        BuildBeam
     }
 
     companion object{

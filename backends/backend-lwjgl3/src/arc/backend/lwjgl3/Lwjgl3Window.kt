@@ -263,7 +263,17 @@ class Lwjgl3Window internal constructor(
 
     fun update(): Boolean {
         if (!isListenerInitialized) {
-            initializeListener()
+            if(config.useVulkan){
+                val vk = Core.vk
+                vk?.beginFrame()
+                try{
+                    initializeListener()
+                } finally{
+                    vk?.endFrame()
+                }
+            }else{
+                initializeListener()
+            }
         }
         synchronized(runnables) {
             executedRunnables.addAll(runnables)
