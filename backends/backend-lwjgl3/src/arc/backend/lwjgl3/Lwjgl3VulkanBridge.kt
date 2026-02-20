@@ -4,7 +4,7 @@ import arc.graphics.GL20
 import arc.graphics.GL30
 import arc.graphics.Vulkan
 import arc.graphics.vk.VkNative
-import arc.mock.MockGL30
+import arc.mock.MockGL20
 import arc.struct.IntIntMap
 import arc.struct.IntSeq
 import arc.util.Log
@@ -13,6 +13,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.nio.IntBuffer
+import java.nio.LongBuffer
 import java.nio.ShortBuffer
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
@@ -21,7 +22,7 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 
-internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : MockGL30(), Vulkan{
+internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : MockGL20(), GL30, Vulkan{
     private val runtime: Lwjgl3VulkanRuntime?
     private val native: VkNative
     private var lastError = GL20.GL_NO_ERROR
@@ -1035,6 +1036,248 @@ internal class Lwjgl3VulkanCompatLayer(windowHandle: Long) : MockGL30(), Vulkan{
         blendDstColor = dfactor
         blendSrcAlpha = sfactor
         blendDstAlpha = dfactor
+    }
+
+    override fun glReadBuffer(mode: Int){
+        // Compat layer currently does not emulate read-back target selection.
+    }
+
+    override fun glDrawRangeElements(mode: Int, start: Int, end: Int, count: Int, type: Int, indices: Buffer){
+    }
+
+    override fun glDrawRangeElements(mode: Int, start: Int, end: Int, count: Int, type: Int, offset: Int){
+    }
+
+    override fun glTexImage3D(target: Int, level: Int, internalformat: Int, width: Int, height: Int, depth: Int, border: Int, format: Int, type: Int, pixels: Buffer?){
+    }
+
+    override fun glTexImage3D(target: Int, level: Int, internalformat: Int, width: Int, height: Int, depth: Int, border: Int, format: Int, type: Int, offset: Int){
+    }
+
+    override fun glTexSubImage3D(target: Int, level: Int, xoffset: Int, yoffset: Int, zoffset: Int, width: Int, height: Int, depth: Int, format: Int, type: Int, pixels: Buffer?){
+    }
+
+    override fun glTexSubImage3D(target: Int, level: Int, xoffset: Int, yoffset: Int, zoffset: Int, width: Int, height: Int, depth: Int, format: Int, type: Int, offset: Int){
+    }
+
+    override fun glCopyTexSubImage3D(target: Int, level: Int, xoffset: Int, yoffset: Int, zoffset: Int, x: Int, y: Int, width: Int, height: Int){
+    }
+
+    override fun glGenQueries(n: Int, ids: IntBuffer){
+    }
+
+    override fun glDeleteQueries(n: Int, ids: IntBuffer){
+    }
+
+    override fun glIsQuery(id: Int): Boolean{
+        return false
+    }
+
+    override fun glBeginQuery(target: Int, id: Int){
+    }
+
+    override fun glEndQuery(target: Int){
+    }
+
+    override fun glGetQueryiv(target: Int, pname: Int, params: IntBuffer){
+    }
+
+    override fun glGetQueryObjectuiv(id: Int, pname: Int, params: IntBuffer){
+    }
+
+    override fun glUnmapBuffer(target: Int): Boolean{
+        return false
+    }
+
+    override fun glGetBufferPointerv(target: Int, pname: Int): Buffer?{
+        return null
+    }
+
+    override fun glDrawBuffers(n: Int, bufs: IntBuffer){
+    }
+
+    override fun glUniformMatrix2x3fv(location: Int, count: Int, transpose: Boolean, value: FloatBuffer){
+    }
+
+    override fun glUniformMatrix3x2fv(location: Int, count: Int, transpose: Boolean, value: FloatBuffer){
+    }
+
+    override fun glUniformMatrix2x4fv(location: Int, count: Int, transpose: Boolean, value: FloatBuffer){
+    }
+
+    override fun glUniformMatrix4x2fv(location: Int, count: Int, transpose: Boolean, value: FloatBuffer){
+    }
+
+    override fun glUniformMatrix3x4fv(location: Int, count: Int, transpose: Boolean, value: FloatBuffer){
+    }
+
+    override fun glUniformMatrix4x3fv(location: Int, count: Int, transpose: Boolean, value: FloatBuffer){
+    }
+
+    override fun glBlitFramebuffer(srcX0: Int, srcY0: Int, srcX1: Int, srcY1: Int, dstX0: Int, dstY0: Int, dstX1: Int, dstY1: Int, mask: Int, filter: Int){
+    }
+
+    override fun glRenderbufferStorageMultisample(target: Int, samples: Int, internalformat: Int, width: Int, height: Int){
+    }
+
+    override fun glFramebufferTextureLayer(target: Int, attachment: Int, texture: Int, level: Int, layer: Int){
+    }
+
+    override fun glFlushMappedBufferRange(target: Int, offset: Int, length: Int){
+    }
+
+    override fun glBeginTransformFeedback(primitiveMode: Int){
+    }
+
+    override fun glEndTransformFeedback(){
+    }
+
+    override fun glBindBufferRange(target: Int, index: Int, buffer: Int, offset: Int, size: Int){
+    }
+
+    override fun glBindBufferBase(target: Int, index: Int, buffer: Int){
+    }
+
+    override fun glTransformFeedbackVaryings(program: Int, varyings: Array<String>, bufferMode: Int){
+    }
+
+    override fun glVertexAttribIPointer(index: Int, size: Int, type: Int, stride: Int, offset: Int){
+    }
+
+    override fun glGetVertexAttribIiv(index: Int, pname: Int, params: IntBuffer){
+    }
+
+    override fun glGetVertexAttribIuiv(index: Int, pname: Int, params: IntBuffer){
+    }
+
+    override fun glVertexAttribI4i(index: Int, x: Int, y: Int, z: Int, w: Int){
+    }
+
+    override fun glVertexAttribI4ui(index: Int, x: Int, y: Int, z: Int, w: Int){
+    }
+
+    override fun glGetUniformuiv(program: Int, location: Int, params: IntBuffer){
+    }
+
+    override fun glGetFragDataLocation(program: Int, name: String): Int{
+        return 0
+    }
+
+    override fun glUniform1uiv(location: Int, count: Int, value: IntBuffer){
+    }
+
+    override fun glUniform3uiv(location: Int, count: Int, value: IntBuffer){
+    }
+
+    override fun glUniform4uiv(location: Int, count: Int, value: IntBuffer){
+    }
+
+    override fun glClearBufferiv(buffer: Int, drawbuffer: Int, value: IntBuffer){
+    }
+
+    override fun glClearBufferuiv(buffer: Int, drawbuffer: Int, value: IntBuffer){
+    }
+
+    override fun glClearBufferfv(buffer: Int, drawbuffer: Int, value: FloatBuffer){
+    }
+
+    override fun glClearBufferfi(buffer: Int, drawbuffer: Int, depth: Float, stencil: Int){
+    }
+
+    override fun glCopyBufferSubData(readTarget: Int, writeTarget: Int, readOffset: Int, writeOffset: Int, size: Int){
+    }
+
+    override fun glGetUniformIndices(program: Int, uniformNames: Array<String>, uniformIndices: IntBuffer){
+    }
+
+    override fun glGetActiveUniformsiv(program: Int, uniformCount: Int, uniformIndices: IntBuffer, pname: Int, params: IntBuffer){
+    }
+
+    override fun glGetUniformBlockIndex(program: Int, uniformBlockName: String): Int{
+        return 0
+    }
+
+    override fun glGetActiveUniformBlockiv(program: Int, uniformBlockIndex: Int, pname: Int, params: IntBuffer){
+    }
+
+    override fun glGetActiveUniformBlockName(program: Int, uniformBlockIndex: Int, length: Buffer, uniformBlockName: Buffer){
+    }
+
+    override fun glUniformBlockBinding(program: Int, uniformBlockIndex: Int, uniformBlockBinding: Int){
+    }
+
+    override fun glDrawArraysInstanced(mode: Int, first: Int, count: Int, instanceCount: Int){
+    }
+
+    override fun glDrawElementsInstanced(mode: Int, count: Int, type: Int, indicesOffset: Int, instanceCount: Int){
+    }
+
+    override fun glGetInteger64v(pname: Int, params: LongBuffer){
+    }
+
+    override fun glGetBufferParameteri64v(target: Int, pname: Int, params: LongBuffer){
+    }
+
+    override fun glGenSamplers(count: Int, samplers: IntBuffer){
+    }
+
+    override fun glDeleteSamplers(count: Int, samplers: IntBuffer){
+    }
+
+    override fun glIsSampler(sampler: Int): Boolean{
+        return false
+    }
+
+    override fun glBindSampler(unit: Int, sampler: Int){
+    }
+
+    override fun glSamplerParameteri(sampler: Int, pname: Int, param: Int){
+    }
+
+    override fun glSamplerParameteriv(sampler: Int, pname: Int, param: IntBuffer){
+    }
+
+    override fun glSamplerParameterf(sampler: Int, pname: Int, param: Float){
+    }
+
+    override fun glSamplerParameterfv(sampler: Int, pname: Int, param: FloatBuffer){
+    }
+
+    override fun glGetSamplerParameteriv(sampler: Int, pname: Int, params: IntBuffer){
+    }
+
+    override fun glGetSamplerParameterfv(sampler: Int, pname: Int, params: FloatBuffer){
+    }
+
+    override fun glVertexAttribDivisor(index: Int, divisor: Int){
+    }
+
+    override fun glBindTransformFeedback(target: Int, id: Int){
+    }
+
+    override fun glDeleteTransformFeedbacks(n: Int, ids: IntBuffer){
+    }
+
+    override fun glGenTransformFeedbacks(n: Int, ids: IntBuffer){
+    }
+
+    override fun glIsTransformFeedback(id: Int): Boolean{
+        return false
+    }
+
+    override fun glPauseTransformFeedback(){
+    }
+
+    override fun glResumeTransformFeedback(){
+    }
+
+    override fun glProgramParameteri(program: Int, pname: Int, value: Int){
+    }
+
+    override fun glInvalidateFramebuffer(target: Int, numAttachments: Int, attachments: IntBuffer){
+    }
+
+    override fun glInvalidateSubFramebuffer(target: Int, numAttachments: Int, attachments: IntBuffer, x: Int, y: Int, width: Int, height: Int){
     }
 
     override fun glBlendFuncSeparate(srcRGB: Int, dstRGB: Int, srcAlpha: Int, dstAlpha: Int){
