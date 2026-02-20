@@ -58,9 +58,13 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     private val posScratch = FloatArray(2)
     private val uvScratch = FloatArray(2)
     private val colorScratch = FloatArray(4)
+    private val effectTexSizeScratch = FloatArray(2)
+    private val effectInvSizeScratch = FloatArray(2)
+    private val effectOffsetScratch = FloatArray(2)
     private var vertexScratch = ByteBuffer.allocateDirect(1024).order(ByteOrder.nativeOrder())
     private var indexScratch = ByteBuffer.allocateDirect(1024).order(ByteOrder.nativeOrder())
     private var textureUploadScratch = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder())
+    private var textureConvertScratch = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder())
 
     private var traceFrameCounter = 0L
     private var traceDrawCallsThisFrame = 0
@@ -97,6 +101,25 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     private var traceEffectBuildBeamThisFrame = 0
     private var traceFboDrawLogsThisFrame = 0
     private var traceFboWriteLogsThisFrame = 0
+    private var perfUniformWritesThisFrame = 0
+    private var perfUniformFloatAllocsThisFrame = 0
+    private var perfUniformMat4AllocsThisFrame = 0
+    private var perfTextureConvertCallsThisFrame = 0
+    private var perfTextureConvertBytesThisFrame = 0L
+    private var perfBufferReallocBytesThisFrame = 0L
+    private var perfScratchGrowVertexBytesThisFrame = 0L
+    private var perfScratchGrowIndexBytesThisFrame = 0L
+    private var perfScratchGrowUploadBytesThisFrame = 0L
+    private var perfScratchGrowConvertBytesThisFrame = 0L
+    private var perfTextureUploadCopyBytesThisFrame = 0L
+    private var perfDirectPathDrawsThisFrame = 0
+    private var perfDirectPacked24PathDrawsThisFrame = 0
+    private var perfDirectNoMix20PathDrawsThisFrame = 0
+    private var perfDecodedPathDrawsThisFrame = 0
+    private var perfDecodedInterleavedFastDrawsThisFrame = 0
+    private var perfDirectVertexBytesThisFrame = 0L
+    private var perfDirectIndicesThisFrame = 0
+    private var perfFastPathRejectedThisFrame = 0
     private var blendSrcColor = GL20.GL_ONE
     private var blendDstColor = GL20.GL_ZERO
     private var blendSrcAlpha = GL20.GL_ONE
@@ -160,6 +183,27 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         clearStencilMaskBounds(Int.MIN_VALUE)
         stencilWriteActive = false
         stencilWriteFramebuffer = Int.MIN_VALUE
+        if(perfTraceEnabled){
+            perfUniformWritesThisFrame = 0
+            perfUniformFloatAllocsThisFrame = 0
+            perfUniformMat4AllocsThisFrame = 0
+            perfTextureConvertCallsThisFrame = 0
+            perfTextureConvertBytesThisFrame = 0L
+            perfBufferReallocBytesThisFrame = 0L
+            perfScratchGrowVertexBytesThisFrame = 0L
+            perfScratchGrowIndexBytesThisFrame = 0L
+            perfScratchGrowUploadBytesThisFrame = 0L
+            perfScratchGrowConvertBytesThisFrame = 0L
+            perfTextureUploadCopyBytesThisFrame = 0L
+            perfDirectPathDrawsThisFrame = 0
+            perfDirectPacked24PathDrawsThisFrame = 0
+            perfDirectNoMix20PathDrawsThisFrame = 0
+            perfDecodedPathDrawsThisFrame = 0
+            perfDecodedInterleavedFastDrawsThisFrame = 0
+            perfDirectVertexBytesThisFrame = 0L
+            perfDirectIndicesThisFrame = 0
+            perfFastPathRejectedThisFrame = 0
+        }
         if(traceEnabled){
             traceDrawCallsThisFrame = 0
             traceSubmitOkThisFrame = 0
@@ -201,8 +245,8 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
 
     override fun endFrame(){
         runtime?.endFrame()
+        traceFrameCounter++
         if(traceEnabled){
-            traceFrameCounter++
             if(traceFrameCounter % 60L == 0L){
                 val submitMs = traceSubmitCpuNanosThisFrame / 1_000_000.0
                 Log.info(
@@ -242,6 +286,35 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
                     traceSkipRead
                 )
             }
+        }
+        if(perfTraceEnabled && traceFrameCounter % 120L == 0L){
+            Log.info(
+                "VkCompat perf frame @ uniform(writes=@ allocFloat=@ allocMat4=@) tex(convertCalls=@ convertBytes=@ uploadCopies=@) alloc(bufRealloc=@ vtxGrow=@ idxGrow=@ uploadGrow=@ convertGrow=@)",
+                traceFrameCounter,
+                perfUniformWritesThisFrame,
+                perfUniformFloatAllocsThisFrame,
+                perfUniformMat4AllocsThisFrame,
+                perfTextureConvertCallsThisFrame,
+                perfTextureConvertBytesThisFrame,
+                perfTextureUploadCopyBytesThisFrame,
+                perfBufferReallocBytesThisFrame,
+                perfScratchGrowVertexBytesThisFrame,
+                perfScratchGrowIndexBytesThisFrame,
+                perfScratchGrowUploadBytesThisFrame,
+                perfScratchGrowConvertBytesThisFrame
+            )
+            Log.info(
+                "VkCompat perf path frame @ direct(draws=@ packed24=@ nomix20=@ vertexBytes=@ indices=@ rejected=@) decoded(draws=@ fastInterleaved=@)",
+                traceFrameCounter,
+                perfDirectPathDrawsThisFrame,
+                perfDirectPacked24PathDrawsThisFrame,
+                perfDirectNoMix20PathDrawsThisFrame,
+                perfDirectVertexBytesThisFrame,
+                perfDirectIndicesThisFrame,
+                perfFastPathRejectedThisFrame,
+                perfDecodedPathDrawsThisFrame,
+                perfDecodedInterleavedFastDrawsThisFrame
+            )
         }
     }
 
@@ -744,52 +817,136 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         return uniform.name
     }
 
+    private fun ensureUniformFloat(program: ProgramState, location: Int, components: Int): FloatArray{
+        val existing = program.uniformFloats[location]
+        if(existing != null && existing.size >= components){
+            return existing
+        }
+
+        val created = FloatArray(components)
+        program.uniformFloats[location] = created
+        if(perfTraceEnabled) perfUniformFloatAllocsThisFrame++
+        return created
+    }
+
+    private fun putUniform1f(program: ProgramState, location: Int, x: Float){
+        val values = ensureUniformFloat(program, location, 1)
+        values[0] = x
+        if(perfTraceEnabled) perfUniformWritesThisFrame++
+    }
+
+    private fun putUniform2f(program: ProgramState, location: Int, x: Float, y: Float){
+        val values = ensureUniformFloat(program, location, 2)
+        values[0] = x
+        values[1] = y
+        if(perfTraceEnabled) perfUniformWritesThisFrame++
+    }
+
+    private fun putUniform3f(program: ProgramState, location: Int, x: Float, y: Float, z: Float){
+        val values = ensureUniformFloat(program, location, 3)
+        values[0] = x
+        values[1] = y
+        values[2] = z
+        if(perfTraceEnabled) perfUniformWritesThisFrame++
+    }
+
+    private fun putUniform4f(program: ProgramState, location: Int, x: Float, y: Float, z: Float, w: Float){
+        val values = ensureUniformFloat(program, location, 4)
+        values[0] = x
+        values[1] = y
+        values[2] = z
+        values[3] = w
+        if(perfTraceEnabled) perfUniformWritesThisFrame++
+    }
+
+    private fun putUniformMatrix4(program: ProgramState, location: Int, source: FloatBuffer){
+        val existing = program.uniformMat4[location]
+        val data = if(existing == null){
+            val created = FloatArray(16)
+            program.uniformMat4[location] = created
+            if(perfTraceEnabled) perfUniformMat4AllocsThisFrame++
+            created
+        }else{
+            existing
+        }
+
+        java.util.Arrays.fill(data, 0f)
+        val src = source.duplicate()
+        for(i in 0 until min(16, src.remaining())){
+            data[i] = src.get()
+        }
+        if(perfTraceEnabled) perfUniformWritesThisFrame++
+    }
+
+    private fun putUniformMatrix4(program: ProgramState, location: Int, source: FloatArray, offset: Int){
+        val existing = program.uniformMat4[location]
+        val data = if(existing == null){
+            val created = FloatArray(16)
+            program.uniformMat4[location] = created
+            if(perfTraceEnabled) perfUniformMat4AllocsThisFrame++
+            created
+        }else{
+            existing
+        }
+
+        java.util.Arrays.fill(data, 0f)
+        for(i in 0 until min(16, source.size - offset)){
+            data[i] = source[offset + i]
+        }
+        if(perfTraceEnabled) perfUniformWritesThisFrame++
+    }
+
     override fun glUniform1i(location: Int, x: Int){
         if(location < 0) return
         val program = currentProgramState() ?: return
         program.uniformInts[location] = x
         program.uniformFloats.remove(location)
+        if(perfTraceEnabled) perfUniformWritesThisFrame++
     }
 
     override fun glUniform2i(location: Int, x: Int, y: Int){
         if(location < 0) return
         val program = currentProgramState() ?: return
         program.uniformInts[location] = x
-        program.uniformFloats[location] = floatArrayOf(x.toFloat(), y.toFloat())
+        putUniform2f(program, location, x.toFloat(), y.toFloat())
     }
 
     override fun glUniform3i(location: Int, x: Int, y: Int, z: Int){
         if(location < 0) return
         val program = currentProgramState() ?: return
         program.uniformInts[location] = x
-        program.uniformFloats[location] = floatArrayOf(x.toFloat(), y.toFloat(), z.toFloat())
+        putUniform3f(program, location, x.toFloat(), y.toFloat(), z.toFloat())
     }
 
     override fun glUniform4i(location: Int, x: Int, y: Int, z: Int, w: Int){
         if(location < 0) return
         val program = currentProgramState() ?: return
         program.uniformInts[location] = x
-        program.uniformFloats[location] = floatArrayOf(x.toFloat(), y.toFloat(), z.toFloat(), w.toFloat())
+        putUniform4f(program, location, x.toFloat(), y.toFloat(), z.toFloat(), w.toFloat())
     }
 
     override fun glUniform1f(location: Int, x: Float){
         if(location < 0) return
-        currentProgramState()?.uniformFloats?.put(location, floatArrayOf(x))
+        val program = currentProgramState() ?: return
+        putUniform1f(program, location, x)
     }
 
     override fun glUniform2f(location: Int, x: Float, y: Float){
         if(location < 0) return
-        currentProgramState()?.uniformFloats?.put(location, floatArrayOf(x, y))
+        val program = currentProgramState() ?: return
+        putUniform2f(program, location, x, y)
     }
 
     override fun glUniform3f(location: Int, x: Float, y: Float, z: Float){
         if(location < 0) return
-        currentProgramState()?.uniformFloats?.put(location, floatArrayOf(x, y, z))
+        val program = currentProgramState() ?: return
+        putUniform3f(program, location, x, y, z)
     }
 
     override fun glUniform4f(location: Int, x: Float, y: Float, z: Float, w: Float){
         if(location < 0) return
-        currentProgramState()?.uniformFloats?.put(location, floatArrayOf(x, y, z, w))
+        val program = currentProgramState() ?: return
+        putUniform4f(program, location, x, y, z, w)
     }
 
     override fun glUniform1fv(location: Int, count: Int, values: FloatArray, offset: Int){
@@ -842,21 +999,14 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
 
     override fun glUniformMatrix4fv(location: Int, count: Int, transpose: Boolean, value: FloatBuffer){
         if(location < 0 || count <= 0) return
-        val data = FloatArray(16)
-        val src = value.duplicate()
-        for(i in 0 until min(16, src.remaining())){
-            data[i] = src.get()
-        }
-        currentProgramState()?.uniformMat4?.put(location, data)
+        val program = currentProgramState() ?: return
+        putUniformMatrix4(program, location, value)
     }
 
     override fun glUniformMatrix4fv(location: Int, count: Int, transpose: Boolean, value: FloatArray, offset: Int){
         if(location < 0 || count <= 0 || offset >= value.size) return
-        val data = FloatArray(16)
-        for(i in 0 until min(16, value.size - offset)){
-            data[i] = value[offset + i]
-        }
-        currentProgramState()?.uniformMat4?.put(location, data)
+        val program = currentProgramState() ?: return
+        putUniformMatrix4(program, location, value, offset)
     }
 
     override fun glGenFramebuffer(): Int{
@@ -1326,9 +1476,18 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         }
         val traceStartNanos = if(traceEnabled) System.nanoTime() else 0L
 
-        if(!buildTriangleIndices(mode, sourceIndices, triangleIndices) || triangleIndices.size == 0){
-            if(traceEnabled) traceSkipMode++
-            return
+        val triangles = if(mode == GL20.GL_TRIANGLES){
+            if(sourceIndices.size == 0 || sourceIndices.size % 3 != 0){
+                if(traceEnabled) traceSkipMode++
+                return
+            }
+            sourceIndices
+        }else{
+            if(!buildTriangleIndices(mode, sourceIndices, triangleIndices) || triangleIndices.size == 0){
+                if(traceEnabled) traceSkipMode++
+                return
+            }
+            triangleIndices
         }
 
         val program = currentProgramState()
@@ -1431,35 +1590,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             }
         }
 
-        val triangleCount = triangleIndices.size
-        ensureIndexScratchCapacity(triangleCount * 2)
-        val outIndices = indexScratch.duplicate().order(ByteOrder.nativeOrder()).asShortBuffer()
-        outIndices.clear()
-
-        vertexRemap.clear()
-        uniqueVertices.clear()
-        uniqueVertices.ensureCapacity(triangleCount)
-
-        for(i in 0 until triangleCount){
-            val index = triangleIndices.items[i]
-            val existing = vertexRemap.get(index, Int.MIN_VALUE)
-            val mapped = if(existing != Int.MIN_VALUE){
-                existing
-            }else{
-                val created = uniqueVertices.size
-                uniqueVertices.add(index)
-                vertexRemap.put(index, created)
-                created
-            }
-            outIndices.put(mapped.toShort())
-        }
-        outIndices.flip()
-
-        val uniqueCount = uniqueVertices.size
-        ensureVertexScratchCapacity(uniqueCount * spriteStride)
-        val outVertices = vertexScratch.duplicate().order(ByteOrder.nativeOrder())
-        outVertices.clear()
-        outVertices.limit(uniqueCount * spriteStride)
+        val triangleCount = triangles.size
         var minX = Float.POSITIVE_INFINITY
         var minY = Float.POSITIVE_INFINITY
         var maxX = Float.NEGATIVE_INFINITY
@@ -1468,46 +1599,173 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         var minV = Float.POSITIVE_INFINITY
         var maxU = Float.NEGATIVE_INFINITY
         var maxV = Float.NEGATIVE_INFINITY
+        var hasBounds = false
 
-        for(i in 0 until uniqueCount){
-            val index = uniqueVertices.items[i]
-            if(!readVec2(pos, index, posScratch)){
-                if(traceEnabled) traceSkipRead++
-                return
-            }
-            if(!readVec2(uv, index, uvScratch)){
-                if(traceEnabled) traceSkipRead++
-                return
-            }
-            val c = readColor(col, index, 0xFFFFFFFF.toInt()) ?: run{
-                if(traceEnabled) traceSkipRead++
-                return
-            }
-            val m = readColor(mix, index, 0) ?: run{
-                if(traceEnabled) traceSkipRead++
-                return
-            }
-            outVertices.putFloat(posScratch[0])
-            outVertices.putFloat(posScratch[1])
-            outVertices.putInt(c)
-            outVertices.putFloat(uvScratch[0])
-            val submittedV = if(flipFramebufferTextureV) 1f - uvScratch[1] else uvScratch[1]
-            outVertices.putFloat(submittedV)
-            outVertices.putInt(m)
-            if(posScratch[0] < minX) minX = posScratch[0]
-            if(posScratch[0] > maxX) maxX = posScratch[0]
-            if(posScratch[1] < minY) minY = posScratch[1]
-            if(posScratch[1] > maxY) maxY = posScratch[1]
-            if(uvScratch[0] < minU) minU = uvScratch[0]
-            if(uvScratch[0] > maxU) maxU = uvScratch[0]
-            if(submittedV < minV) minV = submittedV
-            if(submittedV > maxV) maxV = submittedV
+        val directSubmission = buildDirectSpriteSubmissionIfPossible(
+            triangles = triangles,
+            pos = pos,
+            col = col,
+            uv = uv,
+            mix = mix,
+            flipFramebufferTextureV = flipFramebufferTextureV,
+            stencilWritePass = stencilWritePass
+        )
 
-            if(stencilWritePass){
-                accumulateStencilMaskBounds(posScratch[0], posScratch[1], proj)
+        val outIndices: ShortBuffer
+        val outVertices: ByteBuffer
+        val uniqueCount: Int
+
+        if(directSubmission != null){
+            outIndices = directSubmission.indices
+            outVertices = directSubmission.vertices
+            uniqueCount = directSubmission.vertexCount
+            if(perfTraceEnabled){
+                perfDirectPathDrawsThisFrame++
+                when(directSubmission.mode){
+                    FastPathMode.Packed24 -> perfDirectPacked24PathDrawsThisFrame++
+                    FastPathMode.NoMix20 -> perfDirectNoMix20PathDrawsThisFrame++
+                }
+                perfDirectVertexBytesThisFrame += outVertices.remaining().toLong()
+                perfDirectIndicesThisFrame += triangleCount
             }
+        }else{
+            if(perfTraceEnabled){
+                perfFastPathRejectedThisFrame++
+                perfDecodedPathDrawsThisFrame++
+            }
+            ensureIndexScratchCapacity(triangleCount * 2)
+            outIndices = indexScratch.duplicate().order(ByteOrder.nativeOrder()).asShortBuffer()
+            outIndices.clear()
+            var minTriangleIndex = Int.MAX_VALUE
+            var maxTriangleIndex = Int.MIN_VALUE
+            for(i in 0 until triangleCount){
+                val index = triangles.items[i]
+                if(index < minTriangleIndex) minTriangleIndex = index
+                if(index > maxTriangleIndex) maxTriangleIndex = index
+            }
+            val indexRangeCount = maxTriangleIndex - minTriangleIndex + 1
+            val useRangePath = minTriangleIndex >= 0
+                && indexRangeCount > 0
+                && indexRangeCount <= 0xFFFF
+                && indexRangeCount <= triangleCount * 2
+
+            if(useRangePath){
+                for(i in 0 until triangleCount){
+                    outIndices.put((triangles.items[i] - minTriangleIndex).toShort())
+                }
+                outIndices.flip()
+                uniqueCount = indexRangeCount
+            }else{
+                vertexRemap.clear()
+                uniqueVertices.clear()
+                uniqueVertices.ensureCapacity(triangleCount)
+
+                for(i in 0 until triangleCount){
+                    val index = triangles.items[i]
+                    val existing = vertexRemap.get(index, Int.MIN_VALUE)
+                    val mapped = if(existing != Int.MIN_VALUE){
+                        existing
+                    }else{
+                        val created = uniqueVertices.size
+                        uniqueVertices.add(index)
+                        vertexRemap.put(index, created)
+                        created
+                    }
+                    outIndices.put(mapped.toShort())
+                }
+                outIndices.flip()
+                uniqueCount = uniqueVertices.size
+            }
+
+            ensureVertexScratchCapacity(uniqueCount * spriteStride)
+            outVertices = vertexScratch.duplicate().order(ByteOrder.nativeOrder())
+            outVertices.clear()
+            outVertices.limit(uniqueCount * spriteStride)
+            val interleavedDecode = buildInterleavedDecodeStateIfPossible(pos, col, uv, mix)
+            if(perfTraceEnabled && interleavedDecode != null){
+                perfDecodedInterleavedFastDrawsThisFrame++
+            }
+
+            for(i in 0 until uniqueCount){
+                val index = if(useRangePath) minTriangleIndex + i else uniqueVertices.items[i]
+                val c: Int
+                val m: Int
+                if(interleavedDecode != null){
+                    val base = index * interleavedDecode.stride
+                    val posOffset = base + interleavedDecode.posOffset
+                    val uvOffset = base + interleavedDecode.uvOffset
+                    if(posOffset < 0
+                        || uvOffset < 0
+                        || posOffset + 8 > interleavedDecode.data.limit()
+                        || uvOffset + 8 > interleavedDecode.data.limit()){
+                        if(traceEnabled) traceSkipRead++
+                        return
+                    }
+                    posScratch[0] = interleavedDecode.data.getFloat(posOffset)
+                    posScratch[1] = interleavedDecode.data.getFloat(posOffset + 4)
+                    uvScratch[0] = interleavedDecode.data.getFloat(uvOffset)
+                    uvScratch[1] = interleavedDecode.data.getFloat(uvOffset + 4)
+                    c = if(interleavedDecode.hasColor){
+                        val colorOffset = base + interleavedDecode.colorOffset
+                        if(colorOffset < 0 || colorOffset + 4 > interleavedDecode.data.limit()){
+                            if(traceEnabled) traceSkipRead++
+                            return
+                        }
+                        interleavedDecode.data.getInt(colorOffset)
+                    }else{
+                        0xFFFFFFFF.toInt()
+                    }
+                    m = if(interleavedDecode.hasMix){
+                        val mixOffset = base + interleavedDecode.mixOffset
+                        if(mixOffset < 0 || mixOffset + 4 > interleavedDecode.data.limit()){
+                            if(traceEnabled) traceSkipRead++
+                            return
+                        }
+                        interleavedDecode.data.getInt(mixOffset)
+                    }else{
+                        0
+                    }
+                }else{
+                    if(!readVec2(pos, index, posScratch)){
+                        if(traceEnabled) traceSkipRead++
+                        return
+                    }
+                    if(!readVec2(uv, index, uvScratch)){
+                        if(traceEnabled) traceSkipRead++
+                        return
+                    }
+                    c = readColor(col, index, 0xFFFFFFFF.toInt()) ?: run{
+                        if(traceEnabled) traceSkipRead++
+                        return
+                    }
+                    m = readColor(mix, index, 0) ?: run{
+                        if(traceEnabled) traceSkipRead++
+                        return
+                    }
+                }
+                outVertices.putFloat(posScratch[0])
+                outVertices.putFloat(posScratch[1])
+                outVertices.putInt(c)
+                outVertices.putFloat(uvScratch[0])
+                val submittedV = if(flipFramebufferTextureV) 1f - uvScratch[1] else uvScratch[1]
+                outVertices.putFloat(submittedV)
+                outVertices.putInt(m)
+                if(posScratch[0] < minX) minX = posScratch[0]
+                if(posScratch[0] > maxX) maxX = posScratch[0]
+                if(posScratch[1] < minY) minY = posScratch[1]
+                if(posScratch[1] > maxY) maxY = posScratch[1]
+                if(uvScratch[0] < minU) minU = uvScratch[0]
+                if(uvScratch[0] > maxU) maxU = uvScratch[0]
+                if(submittedV < minV) minV = submittedV
+                if(submittedV > maxV) maxV = submittedV
+
+                if(stencilWritePass){
+                    accumulateStencilMaskBounds(posScratch[0], posScratch[1], proj)
+                }
+            }
+            outVertices.flip()
+            hasBounds = true
         }
-        outVertices.flip()
 
         if(stencilWritePass){
             if(traceEnabled) traceStencilWritePassThisFrame++
@@ -1544,6 +1802,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         }
         if(traceEnabled
             && framebufferTextures.contains(textureId)
+            && hasBounds
             && traceFboDrawLogsThisFrame < 2
             && (traceFrameCounter % 60L == 0L)){
             traceFboDrawLogsThisFrame++
@@ -1581,6 +1840,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         val traceFboWriteWindow = traceFrameCounter < 10L || traceSmallFboWrite
         if(traceEnabled
             && currentFramebuffer != 0
+            && hasBounds
             && traceFboWriteWindow
             && traceFboWriteLogsThisFrame < (if(traceSmallFboWrite) 8 else 20)){
             traceFboWriteLogsThisFrame++
@@ -1683,6 +1943,258 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         }
     }
 
+    private data class DirectSpriteSubmission(
+        val vertices: ByteBuffer,
+        val indices: ShortBuffer,
+        val vertexCount: Int,
+        val mode: FastPathMode
+    )
+
+    private data class InterleavedDecodeState(
+        val data: ByteBuffer,
+        val stride: Int,
+        val posOffset: Int,
+        val uvOffset: Int,
+        val colorOffset: Int,
+        val mixOffset: Int,
+        val hasColor: Boolean,
+        val hasMix: Boolean
+    )
+
+    private fun buildDirectSpriteSubmissionIfPossible(
+        triangles: IntSeq,
+        pos: VertexAttribState,
+        col: VertexAttribState?,
+        uv: VertexAttribState,
+        mix: VertexAttribState?,
+        flipFramebufferTextureV: Boolean,
+        stencilWritePass: Boolean
+    ): DirectSpriteSubmission?{
+        if(flipFramebufferTextureV || stencilWritePass) return null
+
+        buildPacked24SpriteSubmissionIfPossible(triangles, pos, col, uv, mix)?.let{ return it }
+        buildNoMix20SpriteSubmissionIfPossible(triangles, pos, col, uv, mix)?.let{ return it }
+        return null
+    }
+
+    private fun buildPacked24SpriteSubmissionIfPossible(
+        triangles: IntSeq,
+        pos: VertexAttribState,
+        col: VertexAttribState?,
+        uv: VertexAttribState,
+        mix: VertexAttribState?
+    ): DirectSpriteSubmission?{
+        if(col == null || mix == null) return null
+        if(!matchesSpriteInterleavedLayout(pos, col, uv, mix)) return null
+
+        val bufferId = pos.bufferId
+        if(bufferId == 0) return null
+        if(bufferId != col.bufferId || bufferId != uv.bufferId || bufferId != mix.bufferId) return null
+
+        val source = buffers[bufferId]?.data ?: return null
+        val triangleCount = triangles.size
+        if(triangleCount <= 0) return null
+
+        var minIndex = Int.MAX_VALUE
+        var maxIndex = Int.MIN_VALUE
+        val items = triangles.items
+        for(i in 0 until triangleCount){
+            val index = items[i]
+            if(index < 0) return null
+            if(index < minIndex) minIndex = index
+            if(index > maxIndex) maxIndex = index
+        }
+        if(minIndex > maxIndex) return null
+
+        val stride = spriteStride
+        val vertexCount = maxIndex - minIndex + 1
+        if(vertexCount <= 0 || vertexCount > 0xFFFF) return null
+
+        val start = pos.pointer + minIndex * stride
+        val end = start + vertexCount * stride
+        if(start < 0 || end > source.limit()) return null
+
+        val vertexView = source.duplicate().order(ByteOrder.nativeOrder())
+        vertexView.position(start)
+        vertexView.limit(end)
+        val outVertices = vertexView.slice().order(ByteOrder.nativeOrder())
+
+        ensureIndexScratchCapacity(triangleCount * 2)
+        val outIndices = indexScratch.duplicate().order(ByteOrder.nativeOrder()).asShortBuffer()
+        outIndices.clear()
+        for(i in 0 until triangleCount){
+            val mapped = items[i] - minIndex
+            if(mapped < 0 || mapped > 0xFFFF) return null
+            outIndices.put(mapped.toShort())
+        }
+        outIndices.flip()
+
+        return DirectSpriteSubmission(outVertices, outIndices, vertexCount, FastPathMode.Packed24)
+    }
+
+    private fun buildNoMix20SpriteSubmissionIfPossible(
+        triangles: IntSeq,
+        pos: VertexAttribState,
+        col: VertexAttribState?,
+        uv: VertexAttribState,
+        mix: VertexAttribState?
+    ): DirectSpriteSubmission?{
+        if(col == null || mix != null) return null
+        if(!matchesSpriteNoMixInterleavedLayout(pos, col, uv)) return null
+
+        val bufferId = pos.bufferId
+        if(bufferId == 0) return null
+        if(bufferId != col.bufferId || bufferId != uv.bufferId) return null
+
+        val source = buffers[bufferId]?.data ?: return null
+        val triangleCount = triangles.size
+        if(triangleCount <= 0) return null
+
+        var minIndex = Int.MAX_VALUE
+        var maxIndex = Int.MIN_VALUE
+        val items = triangles.items
+        for(i in 0 until triangleCount){
+            val index = items[i]
+            if(index < 0) return null
+            if(index < minIndex) minIndex = index
+            if(index > maxIndex) maxIndex = index
+        }
+        if(minIndex > maxIndex) return null
+
+        val vertexCount = maxIndex - minIndex + 1
+        if(vertexCount <= 0 || vertexCount > 0xFFFF) return null
+
+        val start = pos.pointer + minIndex * noMixSpriteStride
+        val end = start + vertexCount * noMixSpriteStride
+        if(start < 0 || end > source.limit()) return null
+
+        ensureVertexScratchCapacity(vertexCount * spriteStride)
+        val outVertices = vertexScratch.duplicate().order(ByteOrder.nativeOrder())
+        outVertices.clear()
+        outVertices.limit(vertexCount * spriteStride)
+        for(i in 0 until vertexCount){
+            val srcBase = start + i * noMixSpriteStride
+            outVertices.putFloat(source.getFloat(srcBase))
+            outVertices.putFloat(source.getFloat(srcBase + 4))
+            outVertices.putInt(source.getInt(srcBase + 8))
+            outVertices.putFloat(source.getFloat(srcBase + 12))
+            outVertices.putFloat(source.getFloat(srcBase + 16))
+            outVertices.putInt(0)
+        }
+        outVertices.flip()
+
+        ensureIndexScratchCapacity(triangleCount * 2)
+        val outIndices = indexScratch.duplicate().order(ByteOrder.nativeOrder()).asShortBuffer()
+        outIndices.clear()
+        for(i in 0 until triangleCount){
+            val mapped = items[i] - minIndex
+            if(mapped < 0 || mapped > 0xFFFF) return null
+            outIndices.put(mapped.toShort())
+        }
+        outIndices.flip()
+
+        return DirectSpriteSubmission(outVertices, outIndices, vertexCount, FastPathMode.NoMix20)
+    }
+
+    private fun matchesSpriteInterleavedLayout(
+        pos: VertexAttribState,
+        col: VertexAttribState,
+        uv: VertexAttribState,
+        mix: VertexAttribState
+    ): Boolean{
+        if(pos.effectiveStride() != spriteStride
+            || col.effectiveStride() != spriteStride
+            || uv.effectiveStride() != spriteStride
+            || mix.effectiveStride() != spriteStride){
+            return false
+        }
+        if(pos.pointer != 0 || col.pointer != 8 || uv.pointer != 12 || mix.pointer != 20){
+            return false
+        }
+        if(pos.type != GL20.GL_FLOAT || uv.type != GL20.GL_FLOAT){
+            return false
+        }
+        if(pos.size < 2 || uv.size < 2){
+            return false
+        }
+        if(pos.normalized || uv.normalized){
+            return false
+        }
+        if(col.type != GL20.GL_UNSIGNED_BYTE || mix.type != GL20.GL_UNSIGNED_BYTE){
+            return false
+        }
+        if(col.size != 4 || mix.size != 4){
+            return false
+        }
+        if(!col.normalized || !mix.normalized){
+            return false
+        }
+        return true
+    }
+
+    private fun matchesSpriteNoMixInterleavedLayout(
+        pos: VertexAttribState,
+        col: VertexAttribState,
+        uv: VertexAttribState
+    ): Boolean{
+        if(pos.effectiveStride() != noMixSpriteStride
+            || col.effectiveStride() != noMixSpriteStride
+            || uv.effectiveStride() != noMixSpriteStride){
+            return false
+        }
+        if(pos.pointer != 0 || col.pointer != 8 || uv.pointer != 12){
+            return false
+        }
+        if(pos.type != GL20.GL_FLOAT || uv.type != GL20.GL_FLOAT){
+            return false
+        }
+        if(pos.size < 2 || uv.size < 2){
+            return false
+        }
+        if(pos.normalized || uv.normalized){
+            return false
+        }
+        if(col.type != GL20.GL_UNSIGNED_BYTE || col.size != 4 || !col.normalized){
+            return false
+        }
+        return true
+    }
+
+    private fun buildInterleavedDecodeStateIfPossible(
+        pos: VertexAttribState,
+        col: VertexAttribState?,
+        uv: VertexAttribState,
+        mix: VertexAttribState?
+    ): InterleavedDecodeState?{
+        if(pos.type != GL20.GL_FLOAT || pos.size < 2 || pos.normalized) return null
+        if(uv.type != GL20.GL_FLOAT || uv.size < 2 || uv.normalized) return null
+        if(col != null && (col.type != GL20.GL_UNSIGNED_BYTE || col.size < 4)) return null
+        if(mix != null && (mix.type != GL20.GL_UNSIGNED_BYTE || mix.size < 4)) return null
+
+        val stride = pos.effectiveStride()
+        if(stride <= 0) return null
+        if(uv.effectiveStride() != stride) return null
+        if(col != null && col.effectiveStride() != stride) return null
+        if(mix != null && mix.effectiveStride() != stride) return null
+
+        val bufferId = pos.bufferId
+        if(bufferId == 0 || uv.bufferId != bufferId) return null
+        if(col != null && col.bufferId != bufferId) return null
+        if(mix != null && mix.bufferId != bufferId) return null
+
+        val data = buffers[bufferId]?.data ?: return null
+        return InterleavedDecodeState(
+            data = data,
+            stride = stride,
+            posOffset = pos.pointer,
+            uvOffset = uv.pointer,
+            colorOffset = col?.pointer ?: 0,
+            mixOffset = mix?.pointer ?: 0,
+            hasColor = col != null,
+            hasMix = mix != null
+        )
+    }
+
     private fun readVec2(attrib: VertexAttribState, vertex: Int, out: FloatArray): Boolean{
         val x = readAttributeComponent(attrib, vertex, 0) ?: return false
         val y = readAttributeComponent(attrib, vertex, 1) ?: 0f
@@ -1719,12 +2231,21 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         return value.getOrNull(0) ?: fallback
     }
 
-    private fun uniformVec2(program: ProgramState, name: String, fallbackX: Float, fallbackY: Float): FloatArray{
-        val location = program.uniformLocations[name] ?: return floatArrayOf(fallbackX, fallbackY)
-        val value = program.uniformFloats[location] ?: return floatArrayOf(fallbackX, fallbackY)
-        val x = value.getOrNull(0) ?: fallbackX
-        val y = value.getOrNull(1) ?: fallbackY
-        return floatArrayOf(x, y)
+    private fun uniformVec2(program: ProgramState, name: String, fallbackX: Float, fallbackY: Float, out: FloatArray){
+        val location = program.uniformLocations[name]
+        if(location == null){
+            out[0] = fallbackX
+            out[1] = fallbackY
+            return
+        }
+        val value = program.uniformFloats[location]
+        if(value == null){
+            out[0] = fallbackX
+            out[1] = fallbackY
+            return
+        }
+        out[0] = value.getOrNull(0) ?: fallbackX
+        out[1] = value.getOrNull(1) ?: fallbackY
     }
 
     private fun buildEffectUniforms(program: ProgramState, textureId: Int): VkCompatRuntime.EffectUniforms{
@@ -1732,23 +2253,23 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         val texWidth = max(1, tex?.width ?: viewportWidthState).toFloat()
         val texHeight = max(1, tex?.height ?: viewportHeightState).toFloat()
 
-        val texSize = uniformVec2(program, "u_texsize", texWidth, texHeight)
-        val invSizeDefaultX = if(abs(texSize[0]) > 1e-6f) 1f / texSize[0] else 1f / texWidth
-        val invSizeDefaultY = if(abs(texSize[1]) > 1e-6f) 1f / texSize[1] else 1f / texHeight
-        val invSize = uniformVec2(program, "u_invsize", invSizeDefaultX, invSizeDefaultY)
-        val offset = uniformVec2(program, "u_offset", 0f, 0f)
+        uniformVec2(program, "u_texsize", texWidth, texHeight, effectTexSizeScratch)
+        val invSizeDefaultX = if(abs(effectTexSizeScratch[0]) > 1e-6f) 1f / effectTexSizeScratch[0] else 1f / texWidth
+        val invSizeDefaultY = if(abs(effectTexSizeScratch[1]) > 1e-6f) 1f / effectTexSizeScratch[1] else 1f / texHeight
+        uniformVec2(program, "u_invsize", invSizeDefaultX, invSizeDefaultY, effectInvSizeScratch)
+        uniformVec2(program, "u_offset", 0f, 0f, effectOffsetScratch)
         val time = uniformFloat(program, "u_time", 0f)
         val dp = max(1e-4f, uniformFloat(program, "u_dp", 1f))
 
         return VkCompatRuntime.EffectUniforms(
-            texSize[0],
-            texSize[1],
-            invSize[0],
-            invSize[1],
+            effectTexSizeScratch[0],
+            effectTexSizeScratch[1],
+            effectInvSizeScratch[0],
+            effectInvSizeScratch[1],
             time,
             dp,
-            offset[0],
-            offset[1]
+            effectOffsetScratch[0],
+            effectOffsetScratch[1]
         )
     }
 
@@ -2110,12 +2631,14 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     private fun ensureVertexScratchCapacity(requiredBytes: Int){
         if(requiredBytes <= vertexScratch.capacity()) return
         val newCapacity = nextPow2(max(requiredBytes, 1024))
+        if(perfTraceEnabled) perfScratchGrowVertexBytesThisFrame += newCapacity.toLong()
         vertexScratch = ByteBuffer.allocateDirect(newCapacity).order(ByteOrder.nativeOrder())
     }
 
     private fun ensureIndexScratchCapacity(requiredBytes: Int){
         if(requiredBytes <= indexScratch.capacity()) return
         val newCapacity = nextPow2(max(requiredBytes, 1024))
+        if(perfTraceEnabled) perfScratchGrowIndexBytesThisFrame += newCapacity.toLong()
         indexScratch = ByteBuffer.allocateDirect(newCapacity).order(ByteOrder.nativeOrder())
     }
 
@@ -2166,6 +2689,9 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             return existing
         }
         val newCapacity = nextPow2(max(requiredBytes, 1024))
+        if(perfTraceEnabled){
+            perfBufferReallocBytesThisFrame += newCapacity.toLong()
+        }
         val out = ByteBuffer.allocateDirect(newCapacity).order(ByteOrder.nativeOrder())
         out.position(0)
         out.limit(requiredBytes)
@@ -2260,6 +2786,10 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         val safeWidth = max(0, width)
         val safeHeight = max(0, height)
         val pixelCount = safeWidth * safeHeight
+        if(perfTraceEnabled){
+            perfTextureConvertCallsThisFrame++
+            perfTextureConvertBytesThisFrame += pixelCount.toLong() * 4L
+        }
         if(pixelCount == 0){
             return prepareTextureUpload(pixels, 0)
         }
@@ -2268,7 +2798,9 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             return prepareTextureUpload(pixels, pixelCount * 4)
         }
 
-        val out = ByteBuffer.allocateDirect(pixelCount * 4).order(ByteOrder.nativeOrder())
+        val out = ensureTextureConvertScratch(pixelCount * 4)
+        out.position(0)
+        out.limit(pixelCount * 4)
 
         when{
             format == GL20.GL_RGB && type == GL20.GL_UNSIGNED_BYTE -> {
@@ -2392,6 +2924,9 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         }
 
         val out = ensureTextureUploadScratch(size)
+        if(perfTraceEnabled){
+            perfTextureUploadCopyBytesThisFrame += size.toLong()
+        }
         writeToByteBuffer(source, size, out)
         out.position(0)
         out.limit(size)
@@ -2403,8 +2938,23 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             return textureUploadScratch
         }
         val newCapacity = nextPow2(max(requiredBytes, 1024))
+        if(perfTraceEnabled){
+            perfScratchGrowUploadBytesThisFrame += newCapacity.toLong()
+        }
         textureUploadScratch = ByteBuffer.allocateDirect(newCapacity).order(ByteOrder.nativeOrder())
         return textureUploadScratch
+    }
+
+    private fun ensureTextureConvertScratch(requiredBytes: Int): ByteBuffer{
+        if(requiredBytes <= textureConvertScratch.capacity()){
+            return textureConvertScratch
+        }
+        val newCapacity = nextPow2(max(requiredBytes, 1024))
+        if(perfTraceEnabled){
+            perfScratchGrowConvertBytesThisFrame += newCapacity.toLong()
+        }
+        textureConvertScratch = ByteBuffer.allocateDirect(newCapacity).order(ByteOrder.nativeOrder())
+        return textureConvertScratch
     }
 
     private fun detectProgramEffect(fragmentSource: String): ProgramEffectKind{
@@ -2564,6 +3114,11 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         BuildBeam
     }
 
+    private enum class FastPathMode{
+        Packed24,
+        NoMix20
+    }
+
     companion object{
         private const val GL_VERTEX_ARRAY_BINDING = 0x85B5
         private const val maxTextureUnits = 32
@@ -2573,6 +3128,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         private const val maxFragmentUniformVectors = 1024
         private const val maxVaryingVectors = 16
         private const val spriteStride = 24
+        private const val noMixSpriteStride = 20
         private const val GL_COLOR_ATTACHMENT0 = 0x8CE0
         private const val defaultWhiteTextureId = 0
 
@@ -2590,6 +3146,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             """(?:layout\s*\([^)]*\)\s*)?\buniform\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z0-9_]+)\s+([A-Za-z0-9_]+)(?:\s*\[\s*(\d+)\s*])?\s*;"""
         )
         private val traceEnabled = System.getProperty("arc.vulkan.trace") != null || System.getenv("ARC_VULKAN_TRACE") != null
+        private val perfTraceEnabled = System.getProperty("arc.vulkan.perf") != null || System.getenv("ARC_VULKAN_PERF") != null
     }
 }
 
