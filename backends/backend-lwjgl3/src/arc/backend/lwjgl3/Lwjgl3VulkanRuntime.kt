@@ -301,6 +301,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
     enum class SpriteShaderVariant{
         Default,
+        NoMix,
         ScreenCopy,
         Shield,
         BuildBeam
@@ -871,6 +872,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         indices: ByteBuffer,
         indexType: Int,
         indexCount: Int,
+        baseVertex: Int,
         textureId: Int,
         projTrans: FloatArray,
         shaderVariant: SpriteShaderVariant,
@@ -1239,7 +1241,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
             pushConstantsScratch
         )
 
-        VK10.vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0)
+        VK10.vkCmdDrawIndexed(cmd, indexCount, 1, 0, baseVertex, 0)
         if(traceEnabled && currentFramebuffer == 26){
             Log.info(
                 "Vulkan fb26 draw issued idx=@ vertexBytes=@ indexBytes=@ variant=@ blend=@",
@@ -2336,6 +2338,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         MemoryStack.stackPush().use { stack ->
             val vertexSource = when(shaderVariant){
                 SpriteShaderVariant.ScreenCopy -> screenCopyVertexShaderSource
+                SpriteShaderVariant.NoMix -> noMixVertexShaderSource
                 else -> spriteVertexShaderSource
             }
             val vertShaderModule = createShaderModule(
@@ -2351,6 +2354,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
                 compileShader(
                     when(shaderVariant){
                         SpriteShaderVariant.Default -> spriteFragmentShaderSource
+                        SpriteShaderVariant.NoMix -> noMixFragmentShaderSource
                         SpriteShaderVariant.ScreenCopy -> screenCopyFragmentShaderSource
                         SpriteShaderVariant.Shield -> shieldFragmentShaderSource
                         SpriteShaderVariant.BuildBeam -> buildBeamFragmentShaderSource
@@ -2379,7 +2383,8 @@ internal class Lwjgl3VulkanRuntime private constructor(
                 .stride(max(1, blend.vertexStride))
                 .inputRate(VK10.VK_VERTEX_INPUT_RATE_VERTEX)
 
-            val attributeDescriptions = if(shaderVariant == SpriteShaderVariant.ScreenCopy){
+            val attributeDescriptions = when(shaderVariant){
+                SpriteShaderVariant.ScreenCopy -> {
                 val attrs = VkVertexInputAttributeDescription.calloc(2, stack)
                 attrs[0]
                     .binding(0)
@@ -2392,7 +2397,27 @@ internal class Lwjgl3VulkanRuntime private constructor(
                     .format(VK10.VK_FORMAT_R32G32_SFLOAT)
                     .offset(max(0, blend.texCoordOffset))
                 attrs
-            }else{
+                }
+                SpriteShaderVariant.NoMix -> {
+                    val attrs = VkVertexInputAttributeDescription.calloc(3, stack)
+                    attrs[0]
+                        .binding(0)
+                        .location(0)
+                        .format(VK10.VK_FORMAT_R16G16_UNORM)
+                        .offset(max(0, blend.positionOffset))
+                    attrs[1]
+                        .binding(0)
+                        .location(1)
+                        .format(VK10.VK_FORMAT_R8G8B8A8_UNORM)
+                        .offset(max(0, blend.colorOffset))
+                    attrs[2]
+                        .binding(0)
+                        .location(2)
+                        .format(VK10.VK_FORMAT_R16G16_UNORM)
+                        .offset(max(0, blend.texCoordOffset))
+                    attrs
+                }
+                else -> {
                 val attrs = VkVertexInputAttributeDescription.calloc(4, stack)
                 attrs[0]
                     .binding(0)
@@ -2415,6 +2440,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
                     .format(VK10.VK_FORMAT_R8G8B8A8_UNORM)
                     .offset(max(0, blend.mixColorOffset))
                 attrs
+                }
             }
 
             val vertexInputInfo = VkPipelineVertexInputStateCreateInfo.calloc(stack)
@@ -3398,6 +3424,35 @@ void main(){
 }
 """
 
+        private val noMixVertexShaderSource = """
+#version 450
+layout(location = 0) in vec2 a_position;
+layout(location = 1) in vec4 a_color;
+layout(location = 2) in vec2 a_texCoord0;
+
+layout(location = 0) out vec4 v_color;
+layout(location = 2) out vec2 v_texCoords;
+
+layout(push_constant) uniform Push {
+    mat4 u_projTrans;
+    vec2 u_texsize;
+    vec2 u_invsize;
+    float u_time;
+    float u_dp;
+    vec2 u_offset;
+} pc;
+
+void main(){
+    v_color = a_color;
+    v_color.a = v_color.a * (255.0 / 254.0);
+    v_texCoords = a_texCoord0;
+    vec4 pos = pc.u_projTrans * vec4(a_position, 0.0, 1.0);
+    pos.y = -pos.y;
+    pos.z = (pos.z + pos.w) * 0.5;
+    gl_Position = pos;
+}
+"""
+
         private val screenCopyVertexShaderSource = """
 #version 450
 layout(location = 0) in vec2 a_position;
@@ -3449,6 +3504,20 @@ layout(location = 0) out vec4 outColor;
 
 void main(){
     outColor = texture(u_texture, v_texCoords);
+}
+"""
+
+        private val noMixFragmentShaderSource = """
+#version 450
+layout(location = 0) in vec4 v_color;
+layout(location = 2) in vec2 v_texCoords;
+
+layout(set = 0, binding = 0) uniform sampler2D u_texture;
+
+layout(location = 0) out vec4 outColor;
+
+void main(){
+    outColor = v_color * texture(u_texture, v_texCoords);
 }
 """
 
