@@ -83,7 +83,7 @@ class Lwjgl3Graphics(val window: Lwjgl3Window) : Graphics(), Disposable {
     init {
         if (window.config.useVulkan) {
             val vk = Lwjgl3VulkanCompatLayer(window.windowHandle)
-            if (!vk.isSupported()) {
+            if (!vk.isSupported) {
                 throw ArcRuntimeException("Vulkan backend requested, but Vulkan is not supported on this runtime.")
             }
 

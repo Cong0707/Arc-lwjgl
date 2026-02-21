@@ -8,6 +8,11 @@ import org.lwjgl.glfw.GLFW
 import org.lwjgl.glfw.GLFWVulkan
 import org.lwjgl.system.MemoryStack
 import org.lwjgl.system.MemoryUtil
+import org.lwjgl.util.vma.Vma
+import org.lwjgl.util.vma.VmaAllocationCreateInfo
+import org.lwjgl.util.vma.VmaAllocationInfo
+import org.lwjgl.util.vma.VmaAllocatorCreateInfo
+import org.lwjgl.util.vma.VmaVulkanFunctions
 import org.lwjgl.util.shaderc.Shaderc
 import org.lwjgl.vulkan.KHRSurface
 import org.lwjgl.vulkan.KHRSwapchain
@@ -84,6 +89,7 @@ import java.nio.FloatBuffer
 import java.nio.LongBuffer
 import java.io.File
 import java.awt.image.BufferedImage
+import java.util.ArrayDeque
 import javax.imageio.ImageIO
 import kotlin.math.max
 import kotlin.math.min
@@ -97,7 +103,8 @@ internal class Lwjgl3VulkanRuntime private constructor(
     val graphicsQueueFamily: Int,
     val presentQueueFamily: Int,
     val graphicsQueue: VkQueue,
-    val presentQueue: VkQueue
+    val presentQueue: VkQueue,
+    val allocator: Long
 ){
     private var swapchain: Long = VK10.VK_NULL_HANDLE
     private var swapchainFormat: Int = VK10.VK_FORMAT_B8G8R8A8_UNORM
@@ -140,6 +147,10 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private var perfSpriteStreamDropsThisFrame = 0
     private var perfSpriteStreamDropVertexBytesThisFrame = 0L
     private var perfSpriteStreamDropIndexBytesThisFrame = 0L
+    private var perfHostBufferPoolHitsThisFrame = 0
+    private var perfHostBufferPoolMissesThisFrame = 0
+    private var perfHostBufferPoolRecycleThisFrame = 0
+    private var perfHostBufferPoolDropThisFrame = 0
 
     private var spriteDescriptorSetLayout = VK10.VK_NULL_HANDLE
     private var spritePipelineLayout = VK10.VK_NULL_HANDLE
@@ -147,21 +158,22 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private val spritePipelines = HashMap<SpritePipelineKey, Long>()
 
     private var spriteVertexBuffer = VK10.VK_NULL_HANDLE
-    private var spriteVertexBufferMemory = VK10.VK_NULL_HANDLE
+    private var spriteVertexBufferAllocation = VK10.VK_NULL_HANDLE
     private var spriteVertexMappedPtr = 0L
     private var spriteVertexMapped: ByteBuffer? = null
     private var spriteVertexCursor = 0
 
     private var spriteIndexBuffer = VK10.VK_NULL_HANDLE
-    private var spriteIndexBufferMemory = VK10.VK_NULL_HANDLE
+    private var spriteIndexBufferAllocation = VK10.VK_NULL_HANDLE
     private var spriteIndexMappedPtr = 0L
     private var spriteIndexMapped: ByteBuffer? = null
     private var spriteIndexCursor = 0
     private val transientSpriteBuffersByFrame = Array(maxFramesInFlight){ ArrayList<HostVisibleBuffer>() }
+    private val pooledHostVisibleBuffers = HashMap<Long, ArrayDeque<HostVisibleBuffer>>()
 
     private val spriteTextures = HashMap<Int, SpriteTexture>()
     private var textureStagingBuffer = VK10.VK_NULL_HANDLE
-    private var textureStagingMemory = VK10.VK_NULL_HANDLE
+    private var textureStagingAllocation = VK10.VK_NULL_HANDLE
     private var textureStagingMappedPtr = 0L
     private var textureStagingMapped: ByteBuffer? = null
     private var textureStagingCapacity = 0
@@ -691,7 +703,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
     private inline fun uploadTextureWithTempStaging(pixels: ByteBuffer, requiredBytes: Int, crossinline block: (Long) -> Unit){
         if(requiredBytes <= 0) return
-        val staging = createHostVisibleBuffer(requiredBytes, VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+        val staging = acquirePooledHostVisibleBuffer(requiredBytes, VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
         try{
             val mapped = staging.mapped
             val src = pixels.duplicate().order(ByteOrder.nativeOrder())
@@ -712,7 +724,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
             mapped.limit(requiredBytes)
             block(staging.buffer)
         }finally{
-            destroyHostVisibleBuffer(staging)
+            recycleHostVisibleBuffer(staging)
         }
     }
 
@@ -1548,6 +1560,10 @@ internal class Lwjgl3VulkanRuntime private constructor(
             perfSpriteStreamDropsThisFrame = 0
             perfSpriteStreamDropVertexBytesThisFrame = 0L
             perfSpriteStreamDropIndexBytesThisFrame = 0L
+            perfHostBufferPoolHitsThisFrame = 0
+            perfHostBufferPoolMissesThisFrame = 0
+            perfHostBufferPoolRecycleThisFrame = 0
+            perfHostBufferPoolDropThisFrame = 0
         }
         textureStagingCursor = 0
         resetDrawBindingCache()
@@ -1655,7 +1671,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         }
         if(perfTraceEnabled && traceFrameCounter % 120L == 0L){
             Log.info(
-                "Vulkan perf frame @ drawCalls=@ waitIdle=@ oneShotCmd=@ inlineTex=@ staging(recreate=@ allocBytes=@ cap=@) streamSpill(draws=@ vtxBytes=@ idxBytes=@) streamDrop(draws=@ vtxBytes=@ idxBytes=@) defaultFxFallback=@",
+                "Vulkan perf frame @ drawCalls=@ waitIdle=@ oneShotCmd=@ inlineTex=@ staging(recreate=@ allocBytes=@ cap=@) streamSpill(draws=@ vtxBytes=@ idxBytes=@) streamDrop(draws=@ vtxBytes=@ idxBytes=@) hostPool(hit=@ miss=@ recycle=@ drop=@ buckets=@) defaultFxFallback=@",
                 traceFrameCounter,
                 traceDrawCallsThisFrame,
                 perfWaitIdleCallsThisFrame,
@@ -1670,6 +1686,11 @@ internal class Lwjgl3VulkanRuntime private constructor(
                 perfSpriteStreamDropsThisFrame,
                 perfSpriteStreamDropVertexBytesThisFrame,
                 perfSpriteStreamDropIndexBytesThisFrame,
+                perfHostBufferPoolHitsThisFrame,
+                perfHostBufferPoolMissesThisFrame,
+                perfHostBufferPoolRecycleThisFrame,
+                perfHostBufferPoolDropThisFrame,
+                pooledHostVisibleBuffers.size,
                 perfDefaultEffectFallbackThisFrame
             )
         }
@@ -1700,7 +1721,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         val byteCount = width * height * 4
         if(byteCount <= 0) return
 
-        val staging = createHostVisibleBuffer(byteCount, VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+        val staging = acquirePooledHostVisibleBuffer(byteCount, VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT)
         try{
             runSingleTimeCommands { cmd, stack ->
                 transitionImageLayoutCmd(cmd, stack, texture.image, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
@@ -1752,7 +1773,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
             ImageIO.write(image, "png", outFile)
             Log.info("Vulkan trace gpu texture dump id=@ path=@", textureId, outFile.absolutePath)
         }finally{
-            destroyHostVisibleBuffer(staging)
+            recycleHostVisibleBuffer(staging)
         }
     }
 
@@ -1785,6 +1806,10 @@ internal class Lwjgl3VulkanRuntime private constructor(
             commandPool = VK10.VK_NULL_HANDLE
         }
 
+        if(allocator != VK10.VK_NULL_HANDLE){
+            Vma.vmaDestroyAllocator(allocator)
+        }
+
         VK10.vkDestroyDevice(device, null)
         KHRSurface.vkDestroySurfaceKHR(instance, surface, null)
         VK10.vkDestroyInstance(instance, null)
@@ -1792,9 +1817,12 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
     private data class HostVisibleBuffer(
         val buffer: Long,
-        val memory: Long,
+        val allocation: Long,
         val mappedPtr: Long,
-        val mapped: ByteBuffer
+        val mapped: ByteBuffer,
+        val capacity: Int,
+        val usage: Int,
+        val pooled: Boolean
     )
 
     private data class SpriteDrawSpill(
@@ -1829,15 +1857,15 @@ internal class Lwjgl3VulkanRuntime private constructor(
         var vertexSpill: HostVisibleBuffer? = null
         var indexSpill: HostVisibleBuffer? = null
         try{
-            vertexSpill = createHostVisibleBuffer(max(align4(vertexBytes), 4), VK10.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
+            vertexSpill = acquirePooledHostVisibleBuffer(vertexBytes, VK10.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
             copyToMappedBuffer(vertices, vertexBytes, vertexSpill.mapped, vertexSpill.mappedPtr, 0)
 
-            indexSpill = createHostVisibleBuffer(max(align4(indexBytes), 4), VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
+            indexSpill = acquirePooledHostVisibleBuffer(indexBytes, VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
             copyToMappedBuffer(indices, indexBytes, indexSpill.mapped, indexSpill.mappedPtr, 0)
             return SpriteDrawSpill(vertexSpill, indexSpill)
         }catch(_: Throwable){
-            if(indexSpill != null) destroyHostVisibleBuffer(indexSpill)
-            if(vertexSpill != null) destroyHostVisibleBuffer(vertexSpill)
+            if(indexSpill != null) recycleHostVisibleBuffer(indexSpill)
+            if(vertexSpill != null) recycleHostVisibleBuffer(vertexSpill)
             return null
         }
     }
@@ -1846,7 +1874,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         if(frame !in 0 until transientSpriteBuffersByFrame.size) return
         val list = transientSpriteBuffersByFrame[frame]
         for(buffer in list){
-            destroyHostVisibleBuffer(buffer)
+            recycleHostVisibleBuffer(buffer)
         }
         list.clear()
     }
@@ -1876,6 +1904,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         destroySpritePipelines()
         destroySpriteBuffers()
         destroyTextureStagingBuffer()
+        destroyHostVisibleBufferPool()
         destroyOffscreenRenderPass()
         destroySpriteDescriptorResources()
     }
@@ -2013,45 +2042,33 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private fun createSpriteBuffers(){
         val vertexBuffer = createHostVisibleBuffer(spriteVertexBufferSize, VK10.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
         spriteVertexBuffer = vertexBuffer.buffer
-        spriteVertexBufferMemory = vertexBuffer.memory
+        spriteVertexBufferAllocation = vertexBuffer.allocation
         spriteVertexMappedPtr = vertexBuffer.mappedPtr
         spriteVertexMapped = vertexBuffer.mapped
 
         val indexBuffer = createHostVisibleBuffer(spriteIndexBufferSize, VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
         spriteIndexBuffer = indexBuffer.buffer
-        spriteIndexBufferMemory = indexBuffer.memory
+        spriteIndexBufferAllocation = indexBuffer.allocation
         spriteIndexMappedPtr = indexBuffer.mappedPtr
         spriteIndexMapped = indexBuffer.mapped
     }
 
     private fun destroySpriteBuffers(){
-        if(spriteVertexMappedPtr != 0L){
-            VK10.vkUnmapMemory(device, spriteVertexBufferMemory)
-            spriteVertexMappedPtr = 0L
-            spriteVertexMapped = null
+        spriteVertexMappedPtr = 0L
+        spriteVertexMapped = null
+        if(spriteVertexBuffer != VK10.VK_NULL_HANDLE && spriteVertexBufferAllocation != VK10.VK_NULL_HANDLE){
+            Vma.vmaDestroyBuffer(allocator, spriteVertexBuffer, spriteVertexBufferAllocation)
         }
-        if(spriteVertexBuffer != VK10.VK_NULL_HANDLE){
-            VK10.vkDestroyBuffer(device, spriteVertexBuffer, null)
-            spriteVertexBuffer = VK10.VK_NULL_HANDLE
-        }
-        if(spriteVertexBufferMemory != VK10.VK_NULL_HANDLE){
-            VK10.vkFreeMemory(device, spriteVertexBufferMemory, null)
-            spriteVertexBufferMemory = VK10.VK_NULL_HANDLE
-        }
+        spriteVertexBuffer = VK10.VK_NULL_HANDLE
+        spriteVertexBufferAllocation = VK10.VK_NULL_HANDLE
 
-        if(spriteIndexMappedPtr != 0L){
-            VK10.vkUnmapMemory(device, spriteIndexBufferMemory)
-            spriteIndexMappedPtr = 0L
-            spriteIndexMapped = null
+        spriteIndexMappedPtr = 0L
+        spriteIndexMapped = null
+        if(spriteIndexBuffer != VK10.VK_NULL_HANDLE && spriteIndexBufferAllocation != VK10.VK_NULL_HANDLE){
+            Vma.vmaDestroyBuffer(allocator, spriteIndexBuffer, spriteIndexBufferAllocation)
         }
-        if(spriteIndexBuffer != VK10.VK_NULL_HANDLE){
-            VK10.vkDestroyBuffer(device, spriteIndexBuffer, null)
-            spriteIndexBuffer = VK10.VK_NULL_HANDLE
-        }
-        if(spriteIndexBufferMemory != VK10.VK_NULL_HANDLE){
-            VK10.vkFreeMemory(device, spriteIndexBufferMemory, null)
-            spriteIndexBufferMemory = VK10.VK_NULL_HANDLE
-        }
+        spriteIndexBuffer = VK10.VK_NULL_HANDLE
+        spriteIndexBufferAllocation = VK10.VK_NULL_HANDLE
     }
 
     private fun createSpritePipelines(){
@@ -2301,50 +2318,106 @@ internal class Lwjgl3VulkanRuntime private constructor(
         }
     }
 
-    private fun createHostVisibleBuffer(size: Int, usage: Int): HostVisibleBuffer{
+    private fun hostVisiblePoolKey(usage: Int, capacity: Int): Long{
+        return (usage.toLong() shl 32) or (capacity.toLong() and 0xFFFFFFFFL)
+    }
+
+    private fun pooledHostVisibleCapacity(size: Int): Int{
+        return nextPow2(max(align4(size), 4))
+    }
+
+    private fun acquirePooledHostVisibleBuffer(size: Int, usage: Int): HostVisibleBuffer{
+        val capacity = pooledHostVisibleCapacity(size)
+        val key = hostVisiblePoolKey(usage, capacity)
+        val pool = pooledHostVisibleBuffers[key]
+        if(pool != null){
+            while(pool.isNotEmpty()){
+                val reused = pool.removeFirst()
+                if(reused.buffer != VK10.VK_NULL_HANDLE && reused.allocation != VK10.VK_NULL_HANDLE){
+                    if(perfTraceEnabled) perfHostBufferPoolHitsThisFrame++
+                    return reused
+                }
+            }
+            if(pool.isEmpty()){
+                pooledHostVisibleBuffers.remove(key)
+            }
+        }
+        if(perfTraceEnabled) perfHostBufferPoolMissesThisFrame++
+        return createHostVisibleBuffer(capacity, usage, pooled = true)
+    }
+
+    private fun recycleHostVisibleBuffer(buffer: HostVisibleBuffer){
+        if(!buffer.pooled){
+            destroyHostVisibleBuffer(buffer)
+            return
+        }
+        if(buffer.buffer == VK10.VK_NULL_HANDLE || buffer.allocation == VK10.VK_NULL_HANDLE){
+            return
+        }
+        val key = hostVisiblePoolKey(buffer.usage, buffer.capacity)
+        val pool = pooledHostVisibleBuffers.getOrPut(key){ ArrayDeque() }
+        if(pool.size >= maxPooledHostVisibleBuffersPerBucket){
+            if(perfTraceEnabled) perfHostBufferPoolDropThisFrame++
+            destroyHostVisibleBuffer(buffer)
+            return
+        }
+        buffer.mapped.position(0)
+        buffer.mapped.limit(buffer.capacity)
+        if(perfTraceEnabled) perfHostBufferPoolRecycleThisFrame++
+        pool.addLast(buffer)
+    }
+
+    private fun destroyHostVisibleBufferPool(){
+        for(pool in pooledHostVisibleBuffers.values){
+            while(pool.isNotEmpty()){
+                destroyHostVisibleBuffer(pool.removeFirst())
+            }
+        }
+        pooledHostVisibleBuffers.clear()
+    }
+
+    private fun createHostVisibleBuffer(size: Int, usage: Int, pooled: Boolean = false): HostVisibleBuffer{
+        val capacity = max(align4(size), 4)
         MemoryStack.stackPush().use { stack ->
             val bufferInfo = VkBufferCreateInfo.calloc(stack)
             bufferInfo.sType(VK10.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO)
-            bufferInfo.size(size.toLong())
+            bufferInfo.size(capacity.toLong())
             bufferInfo.usage(usage)
             bufferInfo.sharingMode(VK10.VK_SHARING_MODE_EXCLUSIVE)
 
             val pBuffer = stack.mallocLong(1)
-            check(VK10.vkCreateBuffer(device, bufferInfo, null, pBuffer), "Failed creating Vulkan buffer.")
-            val buffer = pBuffer[0]
+            val pAllocation = stack.mallocPointer(1)
+            val allocInfo = VmaAllocationCreateInfo.calloc(stack)
+            allocInfo.usage(Vma.VMA_MEMORY_USAGE_AUTO_PREFER_HOST)
+            allocInfo.flags(Vma.VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT or Vma.VMA_ALLOCATION_CREATE_MAPPED_BIT)
+            allocInfo.requiredFlags(VK10.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT or VK10.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+            allocInfo.preferredFlags(VK10.VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
 
-            val memReq = VkMemoryRequirements.calloc(stack)
-            VK10.vkGetBufferMemoryRequirements(device, buffer, memReq)
-
-            val allocInfo = VkMemoryAllocateInfo.calloc(stack)
-            allocInfo.sType(VK10.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO)
-            allocInfo.allocationSize(memReq.size())
-            allocInfo.memoryTypeIndex(
-                findMemoryType(
-                    memReq.memoryTypeBits(),
-                    VK10.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT or VK10.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-                )
+            val allocationInfo = VmaAllocationInfo.calloc(stack)
+            checkVma(
+                Vma.vmaCreateBuffer(allocator, bufferInfo, allocInfo, pBuffer, pAllocation, allocationInfo),
+                "Failed creating Vulkan host-visible buffer."
             )
+            val buffer = pBuffer[0]
+            val allocation = pAllocation[0]
 
-            val pMemory = stack.mallocLong(1)
-            check(VK10.vkAllocateMemory(device, allocInfo, null, pMemory), "Failed allocating Vulkan buffer memory.")
-            val memory = pMemory[0]
-            check(VK10.vkBindBufferMemory(device, buffer, memory, 0), "Failed binding Vulkan buffer memory.")
+            val mappedPtr = allocationInfo.pMappedData()
+            if(mappedPtr == 0L){
+                Vma.vmaDestroyBuffer(allocator, buffer, allocation)
+                throw ArcRuntimeException("Failed mapping Vulkan host-visible buffer.")
+            }
 
-            val pMapped = stack.mallocPointer(1)
-            check(VK10.vkMapMemory(device, memory, 0, size.toLong(), 0, pMapped), "Failed mapping Vulkan buffer memory.")
-            val mappedPtr = pMapped[0]
-            val mapped = MemoryUtil.memByteBuffer(mappedPtr, size)
+            val mapped = MemoryUtil.memByteBuffer(mappedPtr, capacity)
             mapped.order(java.nio.ByteOrder.nativeOrder())
 
-            return HostVisibleBuffer(buffer, memory, mappedPtr, mapped)
+            return HostVisibleBuffer(buffer, allocation, mappedPtr, mapped, capacity, usage, pooled)
         }
     }
 
     private fun destroyHostVisibleBuffer(buffer: HostVisibleBuffer){
-        VK10.vkUnmapMemory(device, buffer.memory)
-        VK10.vkDestroyBuffer(device, buffer.buffer, null)
-        VK10.vkFreeMemory(device, buffer.memory, null)
+        if(buffer.buffer != VK10.VK_NULL_HANDLE && buffer.allocation != VK10.VK_NULL_HANDLE){
+            Vma.vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation)
+        }
     }
 
     private fun ensureTextureStagingBuffer(requiredBytes: Int){
@@ -2363,26 +2436,20 @@ internal class Lwjgl3VulkanRuntime private constructor(
         }
         val staging = createHostVisibleBuffer(capacity, VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
         textureStagingBuffer = staging.buffer
-        textureStagingMemory = staging.memory
+        textureStagingAllocation = staging.allocation
         textureStagingMappedPtr = staging.mappedPtr
         textureStagingMapped = staging.mapped
         textureStagingCapacity = capacity
     }
 
     private fun destroyTextureStagingBuffer(){
-        if(textureStagingMappedPtr != 0L){
-            VK10.vkUnmapMemory(device, textureStagingMemory)
-            textureStagingMappedPtr = 0L
-            textureStagingMapped = null
+        textureStagingMappedPtr = 0L
+        textureStagingMapped = null
+        if(textureStagingBuffer != VK10.VK_NULL_HANDLE && textureStagingAllocation != VK10.VK_NULL_HANDLE){
+            Vma.vmaDestroyBuffer(allocator, textureStagingBuffer, textureStagingAllocation)
         }
-        if(textureStagingBuffer != VK10.VK_NULL_HANDLE){
-            VK10.vkDestroyBuffer(device, textureStagingBuffer, null)
-            textureStagingBuffer = VK10.VK_NULL_HANDLE
-        }
-        if(textureStagingMemory != VK10.VK_NULL_HANDLE){
-            VK10.vkFreeMemory(device, textureStagingMemory, null)
-            textureStagingMemory = VK10.VK_NULL_HANDLE
-        }
+        textureStagingBuffer = VK10.VK_NULL_HANDLE
+        textureStagingAllocation = VK10.VK_NULL_HANDLE
         textureStagingCapacity = 0
         textureStagingCursor = 0
     }
@@ -3051,6 +3118,12 @@ internal class Lwjgl3VulkanRuntime private constructor(
         }
     }
 
+    private fun checkVma(result: Int, message: String){
+        if(result != VK10.VK_SUCCESS){
+            throw ArcRuntimeException("$message (error=$result)")
+        }
+    }
+
     companion object{
         private const val maxFramesInFlight = 2
         private const val spriteVertexStride = 24
@@ -3058,6 +3131,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         private const val spriteVertexBufferSize = 64 * 1024 * 1024
         private const val spriteIndexBufferSize = 32 * 1024 * 1024
         private const val maxSpriteTextures = 8192
+        private const val maxPooledHostVisibleBuffersPerBucket = 8
         private const val targetSwapchain = 0
         private const val targetOffscreen = 1
         private val traceEnabled = System.getProperty("arc.vulkan.trace") != null || System.getenv("ARC_VULKAN_TRACE") != null
@@ -3257,6 +3331,7 @@ void main(){
             var instance: VkInstance? = null
             var surface = VK10.VK_NULL_HANDLE
             var device: VkDevice? = null
+            var allocator = VK10.VK_NULL_HANDLE
             try{
                 MemoryStack.stackPush().use { stack ->
                     val appInfo = VkApplicationInfo.calloc(stack)
@@ -3321,6 +3396,7 @@ void main(){
                     val graphicsQueue = VkQueue(pQueue[0], device!!)
                     VK10.vkGetDeviceQueue(device!!, queueFamilies.present, 0, pQueue)
                     val presentQueue = VkQueue(pQueue[0], device!!)
+                    allocator = createAllocator(instance!!, physicalDevice, device!!, stack)
 
                     return Lwjgl3VulkanRuntime(
                         windowHandle = windowHandle,
@@ -3331,10 +3407,14 @@ void main(){
                         graphicsQueueFamily = queueFamilies.graphics,
                         presentQueueFamily = queueFamilies.present,
                         graphicsQueue = graphicsQueue,
-                        presentQueue = presentQueue
+                        presentQueue = presentQueue,
+                        allocator = allocator
                     )
                 }
             }catch(e: Throwable){
+                if(allocator != VK10.VK_NULL_HANDLE){
+                    Vma.vmaDestroyAllocator(allocator)
+                }
                 if(device != null){
                     VK10.vkDestroyDevice(device, null)
                 }
@@ -3454,6 +3534,21 @@ void main(){
             if(result != VK10.VK_SUCCESS){
                 throw ArcRuntimeException("$message (error=$result)")
             }
+        }
+
+        private fun createAllocator(instance: VkInstance, physicalDevice: VkPhysicalDevice, device: VkDevice, stack: MemoryStack): Long{
+            val allocatorInfo = VmaAllocatorCreateInfo.calloc(stack)
+            allocatorInfo.instance(instance)
+            allocatorInfo.physicalDevice(physicalDevice)
+            allocatorInfo.device(device)
+            allocatorInfo.vulkanApiVersion(VK10.VK_API_VERSION_1_0)
+            val vulkanFunctions = VmaVulkanFunctions.calloc(stack)
+            vulkanFunctions.set(instance, device)
+            allocatorInfo.pVulkanFunctions(vulkanFunctions)
+
+            val pAllocator = stack.mallocPointer(1)
+            checkCreate(Vma.vmaCreateAllocator(allocatorInfo, pAllocator), "Failed to create Vulkan VMA allocator.")
+            return pAllocator[0]
         }
 
         private fun ensureVkGlobalInitialized(){

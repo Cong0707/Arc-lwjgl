@@ -21,7 +21,7 @@ internal class Lwjgl3VulkanCompatLayer private constructor(bundle: RuntimeBundle
             try {
                 created = Lwjgl3VulkanRuntime.create(windowHandle)
             } catch (t: Throwable) {
-                Log.err("Lwjgl3VulkanCompatLayer", "Failed to create Vulkan runtime.", t)
+                Log.err("[Lwjgl3VulkanCompatLayer] Failed to create Vulkan runtime.", t)
             }
 
             if (created == null) {
