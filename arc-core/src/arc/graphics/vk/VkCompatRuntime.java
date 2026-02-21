@@ -40,11 +40,11 @@ public interface VkCompatRuntime{
     }
 
     final class VertexLayout{
-        public final int stride;
-        public final int positionOffset;
-        public final int colorOffset;
-        public final int texCoordOffset;
-        public final int mixColorOffset;
+        public int stride;
+        public int positionOffset;
+        public int colorOffset;
+        public int texCoordOffset;
+        public int mixColorOffset;
 
         public VertexLayout(int stride, int positionOffset, int colorOffset, int texCoordOffset, int mixColorOffset){
             this.stride = stride;
