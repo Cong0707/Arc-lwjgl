@@ -1,7 +1,6 @@
 package arc.graphics.vk;
 
 import java.nio.ByteBuffer;
-import java.nio.ShortBuffer;
 
 /**
  * Backend-facing native Vulkan runtime contract used by the GL->Vulkan compat layer.
@@ -13,6 +12,7 @@ public interface VkCompatRuntime{
 
     enum SpriteShaderVariant{
         Default,
+        ScreenCopy,
         Shield,
         BuildBeam
     }
@@ -36,6 +36,22 @@ public interface VkCompatRuntime{
             this.dp = dp;
             this.offsetX = offsetX;
             this.offsetY = offsetY;
+        }
+    }
+
+    final class VertexLayout{
+        public final int stride;
+        public final int positionOffset;
+        public final int colorOffset;
+        public final int texCoordOffset;
+        public final int mixColorOffset;
+
+        public VertexLayout(int stride, int positionOffset, int colorOffset, int texCoordOffset, int mixColorOffset){
+            this.stride = stride;
+            this.positionOffset = positionOffset;
+            this.colorOffset = colorOffset;
+            this.texCoordOffset = texCoordOffset;
+            this.mixColorOffset = mixColorOffset;
         }
     }
 
@@ -72,7 +88,9 @@ public interface VkCompatRuntime{
     void drawSprite(
     ByteBuffer vertices,
     int vertexCount,
-    ShortBuffer indices,
+    VertexLayout vertexLayout,
+    ByteBuffer indices,
+    int indexType,
     int indexCount,
     int textureId,
     float[] projTrans,

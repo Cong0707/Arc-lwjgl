@@ -2,7 +2,6 @@ package arc.backend.lwjgl3
 
 import arc.graphics.vk.VkCompatRuntime
 import java.nio.ByteBuffer
-import java.nio.ShortBuffer
 
 internal class Lwjgl3VkCompatRuntimeAdapter(
     private val runtime: Lwjgl3VulkanRuntime
@@ -90,7 +89,9 @@ internal class Lwjgl3VkCompatRuntimeAdapter(
     override fun drawSprite(
         vertices: ByteBuffer,
         vertexCount: Int,
-        indices: ShortBuffer,
+        vertexLayout: VkCompatRuntime.VertexLayout,
+        indices: ByteBuffer,
+        indexType: Int,
         indexCount: Int,
         textureId: Int,
         projTrans: FloatArray,
@@ -109,6 +110,7 @@ internal class Lwjgl3VkCompatRuntimeAdapter(
         blendColorA: Float
     ) {
         val mappedVariant = when (shaderVariant) {
+            VkCompatRuntime.SpriteShaderVariant.ScreenCopy -> Lwjgl3VulkanRuntime.SpriteShaderVariant.ScreenCopy
             VkCompatRuntime.SpriteShaderVariant.Shield -> Lwjgl3VulkanRuntime.SpriteShaderVariant.Shield
             VkCompatRuntime.SpriteShaderVariant.BuildBeam -> Lwjgl3VulkanRuntime.SpriteShaderVariant.BuildBeam
             VkCompatRuntime.SpriteShaderVariant.Default -> Lwjgl3VulkanRuntime.SpriteShaderVariant.Default
@@ -127,11 +129,20 @@ internal class Lwjgl3VkCompatRuntimeAdapter(
                 offsetY = effectUniforms.offsetY
             )
         }
+        val mappedLayout = Lwjgl3VulkanRuntime.SpriteVertexLayout(
+            stride = vertexLayout.stride,
+            positionOffset = vertexLayout.positionOffset,
+            colorOffset = vertexLayout.colorOffset,
+            texCoordOffset = vertexLayout.texCoordOffset,
+            mixColorOffset = vertexLayout.mixColorOffset
+        )
 
         runtime.drawSprite(
             vertices,
             vertexCount,
+            mappedLayout,
             indices,
+            indexType,
             indexCount,
             textureId,
             projTrans,
