@@ -93,6 +93,7 @@ internal class Lwjgl3VkCompatRuntimeAdapter(
         indices: ByteBuffer,
         indexType: Int,
         indexCount: Int,
+        baseVertex: Int,
         textureId: Int,
         projTrans: FloatArray,
         shaderVariant: VkCompatRuntime.SpriteShaderVariant,
@@ -110,6 +111,7 @@ internal class Lwjgl3VkCompatRuntimeAdapter(
         blendColorA: Float
     ) {
         val mappedVariant = when (shaderVariant) {
+            VkCompatRuntime.SpriteShaderVariant.NoMix -> Lwjgl3VulkanRuntime.SpriteShaderVariant.NoMix
             VkCompatRuntime.SpriteShaderVariant.ScreenCopy -> Lwjgl3VulkanRuntime.SpriteShaderVariant.ScreenCopy
             VkCompatRuntime.SpriteShaderVariant.Shield -> Lwjgl3VulkanRuntime.SpriteShaderVariant.Shield
             VkCompatRuntime.SpriteShaderVariant.BuildBeam -> Lwjgl3VulkanRuntime.SpriteShaderVariant.BuildBeam
@@ -144,6 +146,7 @@ internal class Lwjgl3VkCompatRuntimeAdapter(
             indices,
             indexType,
             indexCount,
+            baseVertex,
             textureId,
             projTrans,
             mappedVariant,

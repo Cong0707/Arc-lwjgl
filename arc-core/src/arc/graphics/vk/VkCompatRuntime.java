@@ -12,6 +12,7 @@ public interface VkCompatRuntime{
 
     enum SpriteShaderVariant{
         Default,
+        NoMix,
         ScreenCopy,
         Shield,
         BuildBeam
@@ -92,6 +93,7 @@ public interface VkCompatRuntime{
     ByteBuffer indices,
     int indexType,
     int indexCount,
+    int baseVertex,
     int textureId,
     float[] projTrans,
     SpriteShaderVariant shaderVariant,
