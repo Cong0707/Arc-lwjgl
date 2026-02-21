@@ -6,6 +6,7 @@ import arc.graphics.Vulkan
 import arc.graphics.vk.VkNative
 import arc.mock.MockGL20
 import arc.struct.IntIntMap
+import arc.struct.IntMap
 import arc.struct.IntSeq
 import arc.util.Log
 import java.nio.Buffer
@@ -32,7 +33,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     private val programs = HashMap<Int, ProgramState>()
     private var bufferTable = arrayOfNulls<BufferState>(256)
     private val textures = HashMap<Int, TextureState>()
-    private val vaos = HashMap<Int, VertexArrayState>()
+    private val vaos = IntMap<VertexArrayState>()
     private val framebuffers = HashSet<Int>()
     private val renderbuffers = HashSet<Int>()
     private val framebufferColorAttachments = HashMap<Int, Int>()
@@ -175,7 +176,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     private val clipScratch = FloatArray(2)
 
     init{
-        vaos[0] = VertexArrayState(0)
+        vaos.put(0, VertexArrayState(0))
         for(i in 0 until maxVertexAttribs){
             currentAttribValues[i * 4 + 3] = 1f
         }
@@ -597,9 +598,9 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         if(buffer == 0) return
         removeBufferState(buffer)
         if(currentArrayBuffer == buffer) currentArrayBuffer = 0
-        for(vao in vaos.values){
+        for(vao in vaos.values()){
             if(vao.elementArrayBuffer == buffer) vao.elementArrayBuffer = 0
-            vao.attributes.values.removeIf { it.bufferId == buffer }
+            vao.attributes.removeAll { it.value.bufferId == buffer }
         }
     }
 
@@ -642,7 +643,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         val limit = arrays.limit()
         for(i in 0 until n){
             val id = nextVaoId.getAndIncrement()
-            vaos[id] = VertexArrayState(id)
+            vaos.put(id, VertexArrayState(id))
             val index = base + i
             if(index < limit){
                 // Match GL/LWJGL semantics: write IDs without advancing buffer position.
@@ -653,7 +654,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
 
     override fun glBindVertexArray(array: Int){
         currentVao = array
-        vaos.getOrPut(array){ VertexArrayState(array) }
+        vaos.get(array){ VertexArrayState(array) }
     }
 
     override fun glDeleteVertexArrays(n: Int, arrays: IntBuffer){
@@ -671,15 +672,15 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     }
 
     override fun glEnableVertexAttribArray(index: Int){
-        currentVaoState().attributes.getOrPut(index){ VertexAttribState() }.enabled = true
+        currentVaoState().attributes.get(index){ VertexAttribState() }.enabled = true
     }
 
     override fun glDisableVertexAttribArray(index: Int){
-        currentVaoState().attributes.getOrPut(index){ VertexAttribState() }.enabled = false
+        currentVaoState().attributes.get(index){ VertexAttribState() }.enabled = false
     }
 
     override fun glVertexAttribPointer(indx: Int, size: Int, type: Int, normalized: Boolean, stride: Int, ptr: Int){
-        val attrib = currentVaoState().attributes.getOrPut(indx){ VertexAttribState() }
+        val attrib = currentVaoState().attributes.get(indx){ VertexAttribState() }
         attrib.size = size
         attrib.type = type
         attrib.normalized = normalized
@@ -1059,7 +1060,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     override fun glUniform1i(location: Int, x: Int){
         if(location < 0) return
         val program = currentProgramState() ?: return
-        program.uniformInts[location] = x
+        program.uniformInts.put(location, x)
         program.uniformFloats.remove(location)
         if(perfTraceEnabled) perfUniformWritesThisFrame++
     }
@@ -1067,21 +1068,21 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     override fun glUniform2i(location: Int, x: Int, y: Int){
         if(location < 0) return
         val program = currentProgramState() ?: return
-        program.uniformInts[location] = x
+        program.uniformInts.put(location, x)
         putUniform2f(program, location, x.toFloat(), y.toFloat())
     }
 
     override fun glUniform3i(location: Int, x: Int, y: Int, z: Int){
         if(location < 0) return
         val program = currentProgramState() ?: return
-        program.uniformInts[location] = x
+        program.uniformInts.put(location, x)
         putUniform3f(program, location, x.toFloat(), y.toFloat(), z.toFloat())
     }
 
     override fun glUniform4i(location: Int, x: Int, y: Int, z: Int, w: Int){
         if(location < 0) return
         val program = currentProgramState() ?: return
-        program.uniformInts[location] = x
+        program.uniformInts.put(location, x)
         putUniform4f(program, location, x.toFloat(), y.toFloat(), z.toFloat(), w.toFloat())
     }
 
@@ -3979,7 +3980,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             return state
         }
 
-        val newState = vaos.getOrPut(id) { VertexArrayState(id) }
+        val newState = vaos.get(id) { VertexArrayState(id) }
         currentState = newState
         return newState
     }
@@ -4020,7 +4021,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         val uniforms: MutableList<ProgramUniform> = ArrayList(),
         val attribLocations: MutableMap<String, Int> = LinkedHashMap(),
         val uniformLocations: MutableMap<String, Int> = LinkedHashMap(),
-        val uniformInts: MutableMap<Int, Int> = HashMap(),
+        val uniformInts: IntIntMap = IntIntMap(),
         val uniformFloats: MutableMap<Int, FloatArray> = HashMap(),
         val uniformMat4: MutableMap<Int, FloatArray> = HashMap(),
         var effectKind: ProgramEffectKind = ProgramEffectKind.Default,
@@ -4057,7 +4058,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     private data class VertexArrayState(
         val id: Int,
         var elementArrayBuffer: Int = 0,
-        val attributes: MutableMap<Int, VertexAttribState> = mutableMapOf()
+        val attributes: IntMap<VertexAttribState> = IntMap()
     )
 
     private data class VertexAttribState(
