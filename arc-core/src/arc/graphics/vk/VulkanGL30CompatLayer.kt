@@ -1742,8 +1742,12 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         val texState = textures[textureId]
         val usesProjectionUniform = program.hasProjectionUniform
         val proj = resolveProjection(program)
+        val viewportRelativeFramebufferSample = texState != null
+            && texState.width > 0
+            && texState.height > 0
+            && (texState.width < max(1, viewportWidthState) || texState.height < max(1, viewportHeightState))
         val flipFramebufferTextureV = framebufferTextures.contains(textureId)
-            && (!usesProjectionUniform || isIdentityProjection(proj))
+            && ((!usesProjectionUniform || isIdentityProjection(proj)) || viewportRelativeFramebufferSample)
         if(traceEnabled && flipFramebufferTextureV){
             traceFlipFramebufferTextureThisFrame++
         }
