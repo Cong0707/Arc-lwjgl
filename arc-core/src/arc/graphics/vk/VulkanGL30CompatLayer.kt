@@ -3191,39 +3191,100 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         return readBufferComponent(attrib.data, componentOffset, attrib.type, attrib.normalized)
     }
 
-    private fun readBufferComponent(data: ByteBuffer, offset: Int, type: Int, normalized: Boolean): Float?{
-        return when(type){
-            GL20.GL_FLOAT -> data.getFloat(offset)
-            GL20.GL_FIXED -> data.getInt(offset) / 65536f
-            GL20.GL_UNSIGNED_BYTE -> {
-                val value = data.get(offset).toInt() and 0xFF
-                if(normalized) value / 255f else value.toFloat()
-            }
-            GL20.GL_BYTE -> {
-                val value = data.get(offset).toInt()
-                if(normalized) (value / 127f).coerceIn(-1f, 1f) else value.toFloat()
-            }
+    private fun readBufferComponent(
+        data: ByteBuffer,
+        offset: Int,
+        type: Int,
+        normalized: Boolean
+    ): Float {
+
+        val baseAddress: Long
+        val isDirect = data.isDirect
+
+        if (isDirect) {
+            baseAddress = UNSAFE.getLong(data, ADDRESS_OFFSET) + offset
+        } else {
+            val arr = data.array()
+            baseAddress = UNSAFE.arrayBaseOffset(ByteArray::class.java).toLong() + offset
+            return readHeap(arr, offset, type, normalized)
+        }
+
+        return readDirect(baseAddress, type, normalized)
+    }
+
+    private fun readDirect(
+        addr: Long,
+        type: Int,
+        normalized: Boolean
+    ): Float {
+
+        return when (type) {
+
             GL20.GL_UNSIGNED_SHORT -> {
-                val value = data.getShort(offset).toInt() and 0xFFFF
-                if(normalized) value / 65535f else value.toFloat()
+                val v = UNSAFE.getShort(addr).toInt() and 0xFFFF
+                if (normalized) v * INV_65535 else v.toFloat()
             }
+
             GL20.GL_SHORT -> {
-                val value = data.getShort(offset).toInt()
-                if(normalized) (value / 32767f).coerceIn(-1f, 1f) else value.toFloat()
+                val v = UNSAFE.getShort(addr).toInt()
+                if (normalized) {
+                    val f = v * INV_32767
+                    if (f > 1f) 1f else if (f < -1f) -1f else f
+                } else v.toFloat()
             }
-            GL20.GL_UNSIGNED_INT -> {
-                val value = data.getInt(offset).toLong() and 0xFFFF_FFFFL
-                if(normalized) value.toFloat() / 4_294_967_295f else value.toFloat()
-            }
+
+            GL20.GL_FLOAT ->
+                UNSAFE.getFloat(addr)
+
             GL20.GL_INT -> {
-                val value = data.getInt(offset)
-                if(normalized) (value / 2_147_483_647f).coerceIn(-1f, 1f) else value.toFloat()
+                val v = UNSAFE.getInt(addr)
+                val f = v.toFloat()
+                if (normalized) {
+                    val r = f * INV_2147483647
+                    if (r > 1f) 1f else if (r < -1f) -1f else r
+                } else f
             }
-            GL30.GL_HALF_FLOAT -> {
-                val bits = data.getShort(offset)
-                halfToFloat(bits)
+
+            else -> error("unsupported")
+        }
+    }
+
+    private fun readHeap(
+        arr: ByteArray,
+        offset: Int,
+        type: Int,
+        normalized: Boolean
+    ): Float {
+
+        return when (type) {
+
+            GL20.GL_UNSIGNED_SHORT -> {
+                val v =
+                    ((arr[offset].toInt() and 0xFF) shl 8) or
+                            (arr[offset + 1].toInt() and 0xFF)
+                if (normalized) v * INV_65535 else v.toFloat()
             }
-            else -> null
+
+            GL20.GL_SHORT -> {
+                val v =
+                    (((arr[offset].toInt() and 0xFF) shl 8) or
+                            (arr[offset + 1].toInt() and 0xFF)).toShort().toInt()
+                if (normalized) {
+                    val f = v * INV_32767
+                    if (f > 1f) 1f else if (f < -1f) -1f else f
+                } else v.toFloat()
+            }
+
+            GL20.GL_FLOAT -> {
+                val bits =
+                    ((arr[offset].toInt() and 0xFF) shl 24) or
+                            ((arr[offset + 1].toInt() and 0xFF) shl 16) or
+                            ((arr[offset + 2].toInt() and 0xFF) shl 8) or
+                            (arr[offset + 3].toInt() and 0xFF)
+                java.lang.Float.intBitsToFloat(bits)
+            }
+
+            else -> error("unsupported")
         }
     }
 
@@ -3909,8 +3970,18 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         bufferTable = bufferTable.copyOf(size)
     }
 
-    private fun currentVaoState(): VertexArrayState{
-        return vaos.getOrPut(currentVao){ VertexArrayState(currentVao) }
+    private var currentState: VertexArrayState? = null
+
+    private fun currentVaoState(): VertexArrayState {
+        val id = currentVao
+        val state = currentState
+        if (state != null && state.id == id) {
+            return state
+        }
+
+        val newState = vaos.getOrPut(id) { VertexArrayState(id) }
+        currentState = newState
+        return newState
     }
 
     private fun setError(error: Int){
@@ -3986,7 +4057,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     private data class VertexArrayState(
         val id: Int,
         var elementArrayBuffer: Int = 0,
-        val attributes: MutableMap<Int, VertexAttribState> = HashMap()
+        val attributes: MutableMap<Int, VertexAttribState> = mutableMapOf()
     )
 
     private data class VertexAttribState(
@@ -4023,6 +4094,14 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     }
 
     companion object{
+        private const val INV_255 = 1f / 255f
+        private const val INV_65535 = 1f / 65535f
+        private const val INV_127 = 1f / 127f
+        private const val INV_32767 = 1f / 32767f
+        private const val INV_2147483647 = 1f / 2147483647f
+        private const val INV_4294967295 = 1f / 4294967295f
+        private const val INV_65536 = 1f / 65536f
+
         private const val GL_VERTEX_ARRAY_BINDING = 0x85B5
         private const val maxTextureUnits = 32
         private const val maxTextureSize = 16384
@@ -4057,6 +4136,20 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         )
         private val traceEnabled = System.getProperty("arc.vulkan.trace") != null || System.getenv("ARC_VULKAN_TRACE") != null
         private val perfTraceEnabled = System.getProperty("arc.vulkan.perf") != null || System.getenv("ARC_VULKAN_PERF") != null
+
+        private val UNSAFE: sun.misc.Unsafe
+        private val ADDRESS_OFFSET: Long
+
+        init {
+            val f = sun.misc.Unsafe::class.java.getDeclaredField("theUnsafe")
+            f.isAccessible = true
+            UNSAFE = f.get(null) as sun.misc.Unsafe
+
+            ADDRESS_OFFSET =
+                UNSAFE.objectFieldOffset(
+                    java.nio.Buffer::class.java.getDeclaredField("address")
+                )
+        }
     }
 }
 
