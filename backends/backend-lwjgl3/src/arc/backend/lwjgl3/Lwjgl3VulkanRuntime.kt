@@ -82,7 +82,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.nio.LongBuffer
-import java.nio.ShortBuffer
+import java.io.File
+import java.awt.image.BufferedImage
+import javax.imageio.ImageIO
 import kotlin.math.max
 import kotlin.math.min
 
@@ -122,7 +124,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private var clearR = 0f
     private var clearG = 0f
     private var clearB = 0f
-    private var clearA = 1f
+    private var clearA = 0f
 
     private var traceFrameCounter = 0L
     private var traceDrawCallsThisFrame = 0
@@ -132,6 +134,12 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private var perfTextureStagingRecreateThisFrame = 0
     private var perfTextureStagingAllocBytesThisFrame = 0L
     private var perfDefaultEffectFallbackThisFrame = 0
+    private var perfSpriteStreamSpillsThisFrame = 0
+    private var perfSpriteStreamSpillVertexBytesThisFrame = 0L
+    private var perfSpriteStreamSpillIndexBytesThisFrame = 0L
+    private var perfSpriteStreamDropsThisFrame = 0
+    private var perfSpriteStreamDropVertexBytesThisFrame = 0L
+    private var perfSpriteStreamDropIndexBytesThisFrame = 0L
 
     private var spriteDescriptorSetLayout = VK10.VK_NULL_HANDLE
     private var spritePipelineLayout = VK10.VK_NULL_HANDLE
@@ -149,6 +157,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private var spriteIndexMappedPtr = 0L
     private var spriteIndexMapped: ByteBuffer? = null
     private var spriteIndexCursor = 0
+    private val transientSpriteBuffersByFrame = Array(maxFramesInFlight){ ArrayList<HostVisibleBuffer>() }
 
     private val spriteTextures = HashMap<Int, SpriteTexture>()
     private var textureStagingBuffer = VK10.VK_NULL_HANDLE
@@ -192,6 +201,18 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private var boundBlendColorG = Float.NaN
     private var boundBlendColorB = Float.NaN
     private var boundBlendColorA = Float.NaN
+    private val tracePendingTextureDumpIds = LinkedHashSet<Int>()
+    private val traceDumpedGpuTextures = HashSet<Int>()
+    private var traceOffscreenBindLogsThisFrame = 0
+    private var traceTargetDrawLogsThisFrame = 0
+    private var traceFb26VertexLogThisFrame = 0
+    private val defaultSpriteVertexLayout = SpriteVertexLayout(
+        stride = spriteVertexStride,
+        positionOffset = 0,
+        colorOffset = 8,
+        texCoordOffset = 12,
+        mixColorOffset = 20
+    )
 
     private data class SpriteTexture(
         var width: Int,
@@ -229,6 +250,11 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private data class SpritePipelineKey(
         val target: Int,
         val shaderVariant: Int,
+        val vertexStride: Int,
+        val positionOffset: Int,
+        val colorOffset: Int,
+        val texCoordOffset: Int,
+        val mixColorOffset: Int,
         val blendEnabled: Boolean,
         val srcColor: Int,
         val dstColor: Int,
@@ -243,6 +269,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
     enum class SpriteShaderVariant{
         Default,
+        ScreenCopy,
         Shield,
         BuildBeam
     }
@@ -256,6 +283,14 @@ internal class Lwjgl3VulkanRuntime private constructor(
         val dp: Float,
         val offsetX: Float,
         val offsetY: Float
+    )
+
+    data class SpriteVertexLayout(
+        val stride: Int,
+        val positionOffset: Int,
+        val colorOffset: Int,
+        val texCoordOffset: Int,
+        val mixColorOffset: Int
     )
 
     init{
@@ -278,6 +313,10 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
         if(!ensureRenderTargetBound()) return
         val commandBuffer = currentCommandBuffer ?: return
+        clearActiveColorAttachment(commandBuffer, clearR, clearG, clearB, clearA)
+    }
+
+    private fun clearActiveColorAttachment(commandBuffer: VkCommandBuffer, r: Float, g: Float, b: Float, a: Float){
         MemoryStack.stackPush().use { stack ->
             val clearAttachments = org.lwjgl.vulkan.VkClearAttachment.calloc(1, stack)
             clearAttachments[0]
@@ -285,10 +324,10 @@ internal class Lwjgl3VulkanRuntime private constructor(
                 .colorAttachment(0)
             clearAttachments[0].clearValue()
                 .color()
-                .float32(0, clearR)
-                .float32(1, clearG)
-                .float32(2, clearB)
-                .float32(3, clearA)
+                .float32(0, r)
+                .float32(1, g)
+                .float32(2, b)
+                .float32(3, a)
 
             val clearRect = org.lwjgl.vulkan.VkClearRect.calloc(1, stack)
             clearRect[0]
@@ -303,11 +342,23 @@ internal class Lwjgl3VulkanRuntime private constructor(
     }
 
     fun setCurrentFramebuffer(framebuffer: Int){
+        if(traceEnabled && (framebuffer == 26 || currentFramebuffer == 26)){
+            Log.info("Vulkan setCurrentFramebuffer old=@ new=@ frame=@ active=@", currentFramebuffer, framebuffer, traceFrameCounter, frameActive)
+        }
         currentFramebuffer = framebuffer
     }
 
     fun setFramebufferColorAttachment(framebuffer: Int, textureId: Int, width: Int, height: Int){
         if(framebuffer == 0) return
+        if(traceEnabled && (framebuffer == 26 || textureId == 83)){
+            Log.info(
+                "Vulkan setFramebufferColorAttachment fb=@ tex=@ size=@x@",
+                framebuffer,
+                textureId,
+                width,
+                height
+            )
+        }
 
         if(textureId == 0 || width <= 0 || height <= 0){
             framebufferAttachments.remove(framebuffer)
@@ -374,6 +425,15 @@ internal class Lwjgl3VulkanRuntime private constructor(
         wrapT: Int
     ){
         if(glTextureId == 0 || width <= 0 || height <= 0) return
+        if(traceEnabled && glTextureId == 83){
+            Log.info(
+                "Vulkan uploadTexture tex=@ size=@x@ hasPixels=@",
+                glTextureId,
+                width,
+                height,
+                rgbaPixels != null
+            )
+        }
         val hasPixels = rgbaPixels != null
 
         val existing = spriteTextures[glTextureId]
@@ -448,10 +508,13 @@ internal class Lwjgl3VulkanRuntime private constructor(
                     oldLayout = VK10.VK_IMAGE_LAYOUT_UNDEFINED
                 )
             }else{
-                transitionImageLayout(
-                    image,
-                    VK10.VK_IMAGE_LAYOUT_UNDEFINED,
-                    VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                clearTextureImage(
+                    image = image,
+                    oldLayout = VK10.VK_IMAGE_LAYOUT_UNDEFINED,
+                    r = 0f,
+                    g = 0f,
+                    b = 0f,
+                    a = 0f
                 )
             }
 
@@ -653,6 +716,36 @@ internal class Lwjgl3VulkanRuntime private constructor(
         }
     }
 
+    private fun clearTextureImage(image: Long, oldLayout: Int, r: Float, g: Float, b: Float, a: Float){
+        runSingleTimeCommands { cmd, stack ->
+            transitionImageLayoutCmd(cmd, stack, image, oldLayout, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+
+            val clearColor = org.lwjgl.vulkan.VkClearColorValue.calloc(stack)
+            clearColor.float32(0, r)
+            clearColor.float32(1, g)
+            clearColor.float32(2, b)
+            clearColor.float32(3, a)
+
+            val range = VkImageSubresourceRange.calloc(1, stack)
+            range[0]
+                .aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
+                .baseMipLevel(0)
+                .levelCount(1)
+                .baseArrayLayer(0)
+                .layerCount(1)
+
+            VK10.vkCmdClearColorImage(
+                cmd,
+                image,
+                VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                clearColor,
+                range
+            )
+
+            transitionImageLayoutCmd(cmd, stack, image, VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        }
+    }
+
     private fun updateTextureSampler(texture: SpriteTexture, minFilter: Int, magFilter: Int, wrapS: Int, wrapT: Int){
         val newSampler = createTextureSampler(minFilter, magFilter, wrapS, wrapT)
         val oldSampler = texture.sampler
@@ -742,7 +835,9 @@ internal class Lwjgl3VulkanRuntime private constructor(
     fun drawSprite(
         vertices: ByteBuffer,
         vertexCount: Int,
-        indices: ShortBuffer,
+        vertexLayout: SpriteVertexLayout,
+        indices: ByteBuffer,
+        indexType: Int,
         indexCount: Int,
         textureId: Int,
         projTrans: FloatArray,
@@ -761,15 +856,182 @@ internal class Lwjgl3VulkanRuntime private constructor(
         blendColorA: Float
     ){
         if(!frameActive || vertexCount <= 0 || indexCount <= 0) return
+        if(traceEnabled && (currentFramebuffer == 26 || textureId == 83)){
+            Log.info(
+                "Vulkan drawSprite request frame=@ fb=@ tex=@ vtx=@ idx=@ idxType=@",
+                traceFrameCounter,
+                currentFramebuffer,
+                textureId,
+                vertexCount,
+                indexCount,
+                indexType
+            )
+        }
         if(!ensureRenderTargetBound()) return
         val cmd = currentCommandBuffer ?: return
         val texture = spriteTextures[textureId] ?: return
-        val mappedVertex = spriteVertexMapped ?: return
-        val mappedIndex = spriteIndexMapped ?: return
+        if(traceEnabled
+            && traceTargetDrawLogsThisFrame < 6
+            && (traceFrameCounter < 240L || traceFrameCounter % 120L == 0L)
+            && (textureId == 24 || textureId == 83)){
+            traceTargetDrawLogsThisFrame++
+            Log.info(
+                "Vulkan draw target frame=@ tex=@ currentFb=@ activeFb=@ activeSize=@x@ desc=@ img=@ samp=@",
+                traceFrameCounter,
+                textureId,
+                currentFramebuffer,
+                activeFramebuffer,
+                activeTargetWidth,
+                activeTargetHeight,
+                texture.descriptorSet,
+                texture.image,
+                texture.sampler
+            )
+        }
+        if(traceEnabled && currentFramebuffer == 26 && traceFb26VertexLogThisFrame < 2){
+            traceFb26VertexLogThisFrame++
+            try{
+                val firstIndex = when(indexType){
+                    GL20.GL_UNSIGNED_SHORT -> if(indices.remaining() >= 2) (indices.getShort(indices.position()).toInt() and 0xFFFF) else -1
+                    GL20.GL_UNSIGNED_INT -> if(indices.remaining() >= 4) indices.getInt(indices.position()) else -1
+                    else -> -1
+                }
+                if(firstIndex >= 0 && firstIndex < vertexCount){
+                    val stride = max(1, vertexLayout.stride)
+                    val base = firstIndex * stride
+                    val posOffset = base + max(0, vertexLayout.positionOffset)
+                    val uvOffset = base + max(0, vertexLayout.texCoordOffset)
+                    val colorOffset = if(vertexLayout.colorOffset >= 0) base + vertexLayout.colorOffset else -1
+                    val mixOffset = if(vertexLayout.mixColorOffset >= 0) base + vertexLayout.mixColorOffset else -1
+                    val vx = if(posOffset + 8 <= vertices.limit()) vertices.getFloat(posOffset) else Float.NaN
+                    val vy = if(posOffset + 8 <= vertices.limit()) vertices.getFloat(posOffset + 4) else Float.NaN
+                    val vu = if(uvOffset + 8 <= vertices.limit()) vertices.getFloat(uvOffset) else Float.NaN
+                    val vv = if(uvOffset + 8 <= vertices.limit()) vertices.getFloat(uvOffset + 4) else Float.NaN
+                    val vColor = if(colorOffset >= 0 && colorOffset + 4 <= vertices.limit()) vertices.getInt(colorOffset) else 0
+                    val vMix = if(mixOffset >= 0 && mixOffset + 4 <= vertices.limit()) vertices.getInt(mixOffset) else 0
+                    Log.info(
+                        "Vulkan fb26 vtx sample idx=@ pos=(@,@) uv=(@,@) color=0x@ mix=0x@ stride=@ offs(p=@ c=@ uv=@ m=@) blend=[@ sf=@ df=@ sa=@ da=@] vp=[set=@ @,@ @x@] sc=[enabled=@ set=@ @,@ @x@]",
+                        firstIndex,
+                        vx,
+                        vy,
+                        vu,
+                        vv,
+                        java.lang.Integer.toHexString(vColor),
+                        java.lang.Integer.toHexString(vMix),
+                        vertexLayout.stride,
+                        vertexLayout.positionOffset,
+                        vertexLayout.colorOffset,
+                        vertexLayout.texCoordOffset,
+                        vertexLayout.mixColorOffset,
+                        blendEnabled,
+                        blendSrcColor,
+                        blendDstColor,
+                        blendSrcAlpha,
+                        blendDstAlpha,
+                        viewportSet,
+                        viewportX,
+                        viewportY,
+                        viewportWidth,
+                        viewportHeight,
+                        scissorEnabled,
+                        scissorSet,
+                        scissorX,
+                        scissorY,
+                        scissorWidth,
+                        scissorHeight
+                    )
+                    val inspectCount = min(indexCount, 24)
+                    val inspectBase = indices.position()
+                    val indexSample = StringBuilder()
+                    var sampleMinX = Float.POSITIVE_INFINITY
+                    var sampleMinY = Float.POSITIVE_INFINITY
+                    var sampleMaxX = Float.NEGATIVE_INFINITY
+                    var sampleMaxY = Float.NEGATIVE_INFINITY
+                    var sampledVertices = 0
+                    var fullMinX = Float.POSITIVE_INFINITY
+                    var fullMinY = Float.POSITIVE_INFINITY
+                    var fullMaxX = Float.NEGATIVE_INFINITY
+                    var fullMaxY = Float.NEGATIVE_INFINITY
+                    var fullSampledVertices = 0
+                    for(i in 0 until inspectCount){
+                        val idx = when(indexType){
+                            GL20.GL_UNSIGNED_SHORT -> {
+                                val off = inspectBase + i * 2
+                                if(off + 2 <= indices.limit()) indices.getShort(off).toInt() and 0xFFFF else -1
+                            }
+                            GL20.GL_UNSIGNED_INT -> {
+                                val off = inspectBase + i * 4
+                                if(off + 4 <= indices.limit()) indices.getInt(off) else -1
+                            }
+                            else -> -1
+                        }
+                        if(idx < 0 || idx >= vertexCount) continue
+                        val p = idx * stride + max(0, vertexLayout.positionOffset)
+                        if(p + 8 > vertices.limit()) continue
+                        val px = vertices.getFloat(p)
+                        val py = vertices.getFloat(p + 4)
+                        sampleMinX = min(sampleMinX, px)
+                        sampleMinY = min(sampleMinY, py)
+                        sampleMaxX = max(sampleMaxX, px)
+                        sampleMaxY = max(sampleMaxY, py)
+                        sampledVertices++
+                        if(i < 12){
+                            if(indexSample.isNotEmpty()) indexSample.append(";")
+                            indexSample.append(i).append(":").append(idx).append("@(").append(px).append(",").append(py).append(")")
+                        }
+                    }
+                    for(i in 0 until indexCount){
+                        val idx = when(indexType){
+                            GL20.GL_UNSIGNED_SHORT -> {
+                                val off = inspectBase + i * 2
+                                if(off + 2 <= indices.limit()) indices.getShort(off).toInt() and 0xFFFF else -1
+                            }
+                            GL20.GL_UNSIGNED_INT -> {
+                                val off = inspectBase + i * 4
+                                if(off + 4 <= indices.limit()) indices.getInt(off) else -1
+                            }
+                            else -> -1
+                        }
+                        if(idx < 0 || idx >= vertexCount) continue
+                        val p = idx * stride + max(0, vertexLayout.positionOffset)
+                        if(p + 8 > vertices.limit()) continue
+                        val px = vertices.getFloat(p)
+                        val py = vertices.getFloat(p + 4)
+                        fullMinX = min(fullMinX, px)
+                        fullMinY = min(fullMinY, py)
+                        fullMaxX = max(fullMaxX, px)
+                        fullMaxY = max(fullMaxY, py)
+                        fullSampledVertices++
+                    }
+                    Log.info(
+                        "Vulkan fb26 idx sample n=@ sampled=@ bounds=[@,@]-[@,@] fullSampled=@ fullBounds=[@,@]-[@,@] seq=@",
+                        inspectCount,
+                        sampledVertices,
+                        sampleMinX,
+                        sampleMinY,
+                        sampleMaxX,
+                        sampleMaxY,
+                        fullSampledVertices,
+                        fullMinX,
+                        fullMinY,
+                        fullMaxX,
+                        fullMaxY,
+                        indexSample.toString()
+                    )
+                }else{
+                    Log.info("Vulkan fb26 vtx sample unavailable index=@ vertexCount=@ idxType=@", firstIndex, vertexCount, indexType)
+                }
+            }catch(t: Throwable){
+                Log.info("Vulkan fb26 vtx sample failed reason=@", t.toString())
+            }
+        }
+        val mappedVertex = spriteVertexMapped
+        val mappedIndex = spriteIndexMapped
 
         val pipeline = getSpritePipeline(
             activeFramebuffer == 0,
             shaderVariant,
+            vertexLayout,
             blendEnabled,
             blendSrcColor,
             blendDstColor,
@@ -778,47 +1040,74 @@ internal class Lwjgl3VulkanRuntime private constructor(
             blendEqColor,
             blendEqAlpha
         )
-        if(pipeline == VK10.VK_NULL_HANDLE) return
-
-        val vertexBytes = vertices.remaining()
-        val indexBytes = indexCount * 2
-        if(indices.remaining() < indexCount) return
-        if(spriteVertexCursor + vertexBytes > spriteVertexBufferSize || spriteIndexCursor + indexBytes > spriteIndexBufferSize){
+        if(pipeline == VK10.VK_NULL_HANDLE){
+            if(traceEnabled && currentFramebuffer == 26){
+                Log.info("Vulkan fb26 draw skipped: pipeline null")
+            }
             return
         }
 
-        val vertexOffset = spriteVertexCursor
-        if(vertices.isDirect){
-            val srcAddress = MemoryUtil.memAddress(vertices) + vertices.position().toLong()
-            MemoryUtil.memCopy(srcAddress, spriteVertexMappedPtr + vertexOffset.toLong(), vertexBytes.toLong())
-        }else{
-            val srcVerts = vertices.duplicate()
-            val srcLimit = srcVerts.limit()
-            srcVerts.limit(srcVerts.position() + vertexBytes)
-            val dstVerts = mappedVertex.duplicate()
-            dstVerts.position(vertexOffset)
-            dstVerts.limit(vertexOffset + vertexBytes)
-            dstVerts.put(srcVerts)
-            srcVerts.limit(srcLimit)
+        val vertexBytes = vertices.remaining()
+        val indexBytesPer = when(indexType){
+            GL20.GL_UNSIGNED_SHORT -> 2
+            GL20.GL_UNSIGNED_INT -> 4
+            else -> return
         }
-        spriteVertexCursor += align4(vertexBytes)
+        val indexBytes = indexCount * indexBytesPer
+        if(indices.remaining() < indexBytes){
+            if(traceEnabled && currentFramebuffer == 26){
+                Log.info(
+                    "Vulkan fb26 draw skipped: index bytes short rem=@ need=@",
+                    indices.remaining(),
+                    indexBytes
+                )
+            }
+            return
+        }
+        val usePersistentStream = mappedVertex != null
+            && mappedIndex != null
+            && spriteVertexCursor + vertexBytes <= spriteVertexBufferSize
+            && spriteIndexCursor + indexBytes <= spriteIndexBufferSize
 
-        val indexOffset = spriteIndexCursor
-        if(indices.isDirect){
-            val srcAddress = MemoryUtil.memAddress(indices) + indices.position().toLong() * 2L
-            MemoryUtil.memCopy(srcAddress, spriteIndexMappedPtr + indexOffset.toLong(), indexBytes.toLong())
+        val vertexOffset: Int
+        val indexOffset: Int
+        val boundVertexBuffer: Long
+        val boundIndexBuffer: Long
+
+        if(usePersistentStream){
+            vertexOffset = spriteVertexCursor
+            copyToMappedBuffer(vertices, vertexBytes, mappedVertex!!, spriteVertexMappedPtr, vertexOffset)
+            spriteVertexCursor += align4(vertexBytes)
+
+            indexOffset = spriteIndexCursor
+            copyToMappedBuffer(indices, indexBytes, mappedIndex!!, spriteIndexMappedPtr, indexOffset)
+            spriteIndexCursor += align4(indexBytes)
+
+            boundVertexBuffer = spriteVertexBuffer
+            boundIndexBuffer = spriteIndexBuffer
         }else{
-            val dstIndices = mappedIndex.duplicate()
-            dstIndices.position(indexOffset)
-            dstIndices.limit(indexOffset + indexBytes)
-            val dstShort = dstIndices.slice().order(ByteOrder.nativeOrder()).asShortBuffer()
-            val srcShort = indices.duplicate()
-            val srcLimit = srcShort.limit()
-            srcShort.limit(srcShort.position() + indexCount)
-            dstShort.put(srcShort)
-            srcShort.limit(srcLimit)
+            val spilled = spillSpriteDrawToTransientBuffers(vertices, vertexBytes, indices, indexBytes)
+            if(spilled == null){
+                if(perfTraceEnabled){
+                    perfSpriteStreamDropsThisFrame++
+                    perfSpriteStreamDropVertexBytesThisFrame += vertexBytes.toLong()
+                    perfSpriteStreamDropIndexBytesThisFrame += indexBytes.toLong()
+                }
+                return
+            }
+
+            transientSpriteBuffersByFrame[currentFrame].add(spilled.vertex)
+            transientSpriteBuffersByFrame[currentFrame].add(spilled.index)
+            vertexOffset = 0
+            indexOffset = 0
+            boundVertexBuffer = spilled.vertex.buffer
+            boundIndexBuffer = spilled.index.buffer
+            if(perfTraceEnabled){
+                perfSpriteStreamSpillsThisFrame++
+                perfSpriteStreamSpillVertexBytesThisFrame += vertexBytes.toLong()
+                perfSpriteStreamSpillIndexBytesThisFrame += indexBytes.toLong()
+            }
         }
-        spriteIndexCursor += align4(indexBytes)
 
         if(boundPipeline != pipeline){
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline)
@@ -828,12 +1117,13 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
         bindVertexBufferHandles.position(0)
         bindVertexBufferHandles.limit(1)
-        bindVertexBufferHandles.put(0, spriteVertexBuffer)
+        bindVertexBufferHandles.put(0, boundVertexBuffer)
         bindVertexBufferOffsets.position(0)
         bindVertexBufferOffsets.limit(1)
         bindVertexBufferOffsets.put(0, vertexOffset.toLong())
         VK10.vkCmdBindVertexBuffers(cmd, 0, bindVertexBufferHandles, bindVertexBufferOffsets)
-        VK10.vkCmdBindIndexBuffer(cmd, spriteIndexBuffer, indexOffset.toLong(), VK10.VK_INDEX_TYPE_UINT16)
+        val vkIndexType = if(indexType == GL20.GL_UNSIGNED_INT) VK10.VK_INDEX_TYPE_UINT32 else VK10.VK_INDEX_TYPE_UINT16
+        VK10.vkCmdBindIndexBuffer(cmd, boundIndexBuffer, indexOffset.toLong(), vkIndexType)
 
         if(boundDescriptorSet != texture.descriptorSet){
             bindDescriptorSets.position(0)
@@ -880,6 +1170,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         val effectDp: Float
         val effectOffsetX: Float
         val effectOffsetY: Float
+        val requiresEffectUniforms = shaderVariant == SpriteShaderVariant.Shield || shaderVariant == SpriteShaderVariant.BuildBeam
         if(effectUniforms == null){
             effectTexWidth = texWidthDefault
             effectTexHeight = texHeightDefault
@@ -889,7 +1180,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
             effectDp = 1f
             effectOffsetX = 0f
             effectOffsetY = 0f
-            if(perfTraceEnabled) perfDefaultEffectFallbackThisFrame++
+            if(perfTraceEnabled && requiresEffectUniforms) perfDefaultEffectFallbackThisFrame++
         }else{
             effectTexWidth = effectUniforms.texWidth
             effectTexHeight = effectUniforms.texHeight
@@ -919,15 +1210,30 @@ internal class Lwjgl3VulkanRuntime private constructor(
         )
 
         VK10.vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0)
+        if(traceEnabled && currentFramebuffer == 26){
+            Log.info(
+                "Vulkan fb26 draw issued idx=@ vertexBytes=@ indexBytes=@ variant=@ blend=@",
+                indexCount,
+                vertexBytes,
+                indexBytes,
+                shaderVariant,
+                blendEnabled
+            )
+        }
 
         if(traceEnabled || perfTraceEnabled){
             traceDrawCallsThisFrame++
+        }
+
+        if(traceEnabled && (textureId == 83 || textureId == 24) && !traceDumpedGpuTextures.contains(textureId)){
+            tracePendingTextureDumpIds.add(textureId)
         }
     }
 
     private fun getSpritePipeline(
         swapchainTarget: Boolean,
         shaderVariant: SpriteShaderVariant,
+        vertexLayout: SpriteVertexLayout,
         blendEnabled: Boolean,
         blendSrcColor: Int,
         blendDstColor: Int,
@@ -940,6 +1246,11 @@ internal class Lwjgl3VulkanRuntime private constructor(
         val key = SpritePipelineKey(
             target = renderTarget,
             shaderVariant = shaderVariant.ordinal,
+            vertexStride = vertexLayout.stride,
+            positionOffset = vertexLayout.positionOffset,
+            colorOffset = vertexLayout.colorOffset,
+            texCoordOffset = vertexLayout.texCoordOffset,
+            mixColorOffset = vertexLayout.mixColorOffset,
             blendEnabled = blendEnabled,
             srcColor = blendSrcColor,
             dstColor = blendDstColor,
@@ -963,6 +1274,9 @@ internal class Lwjgl3VulkanRuntime private constructor(
         val cmd = currentCommandBuffer ?: return false
 
         if(activeFramebuffer == currentFramebuffer){
+            if(traceEnabled && currentFramebuffer == 26){
+                Log.info("Vulkan ensureRenderTargetBound fb=26 already-bound")
+            }
             return true
         }
 
@@ -982,8 +1296,26 @@ internal class Lwjgl3VulkanRuntime private constructor(
             return true
         }
 
-        val attachment = framebufferAttachments[currentFramebuffer] ?: return false
-        val target = ensureOffscreenTarget(currentFramebuffer, attachment) ?: return false
+        val attachment = framebufferAttachments[currentFramebuffer]
+        if(attachment == null){
+            if(traceEnabled && currentFramebuffer == 26){
+                Log.info("Vulkan ensureRenderTargetBound fb=26 missing attachment")
+            }
+            return false
+        }
+        val target = ensureOffscreenTarget(currentFramebuffer, attachment)
+        if(target == null){
+            if(traceEnabled && currentFramebuffer == 26){
+                Log.info(
+                    "Vulkan ensureRenderTargetBound fb=26 target-null tex=@ attSize=@x@ texExists=@",
+                    attachment.textureId,
+                    attachment.width,
+                    attachment.height,
+                    spriteTextures.containsKey(attachment.textureId)
+                )
+            }
+            return false
+        }
 
         beginRenderPass(
             commandBuffer = cmd,
@@ -992,9 +1324,30 @@ internal class Lwjgl3VulkanRuntime private constructor(
             width = target.width,
             height = target.height
         )
+        if(traceEnabled
+            && traceOffscreenBindLogsThisFrame < 4
+            && (traceFrameCounter < 240L || traceFrameCounter % 120L == 0L)){
+            traceOffscreenBindLogsThisFrame++
+            Log.info(
+                "Vulkan offscreen bind frame=@ fb=@ attTex=@ size=@x@",
+                traceFrameCounter,
+                currentFramebuffer,
+                attachment.textureId,
+                target.width,
+                target.height
+            )
+        }
         activeFramebuffer = currentFramebuffer
         activeTargetWidth = target.width
         activeTargetHeight = target.height
+        if(traceEnabled && currentFramebuffer == 26){
+            Log.info(
+                "Vulkan ensureRenderTargetBound fb=26 bound tex=@ size=@x@",
+                attachment.textureId,
+                target.width,
+                target.height
+            )
+        }
         return true
     }
 
@@ -1108,7 +1461,16 @@ internal class Lwjgl3VulkanRuntime private constructor(
     }
 
     private fun ensureOffscreenTarget(framebufferId: Int, attachment: FramebufferAttachment): OffscreenTarget?{
-        val texture = spriteTextures[attachment.textureId] ?: return null
+        val texture = spriteTextures[attachment.textureId]
+        if(texture == null){
+            if(traceEnabled && framebufferId == 26){
+                Log.info(
+                    "Vulkan ensureOffscreenTarget fb=26 missing-texture tex=@",
+                    attachment.textureId
+                )
+            }
+            return null
+        }
         val existing = offscreenTargets[framebufferId]
         if(existing != null
             && existing.textureId == attachment.textureId
@@ -1141,6 +1503,14 @@ internal class Lwjgl3VulkanRuntime private constructor(
                 height = attachment.height
             )
             offscreenTargets[framebufferId] = target
+            if(traceEnabled && framebufferId == 26){
+                Log.info(
+                    "Vulkan ensureOffscreenTarget created fb=26 tex=@ size=@x@",
+                    attachment.textureId,
+                    attachment.width,
+                    attachment.height
+                )
+            }
             return target
         }
     }
@@ -1172,12 +1542,22 @@ internal class Lwjgl3VulkanRuntime private constructor(
             perfTextureStagingRecreateThisFrame = 0
             perfTextureStagingAllocBytesThisFrame = 0L
             perfDefaultEffectFallbackThisFrame = 0
+            perfSpriteStreamSpillsThisFrame = 0
+            perfSpriteStreamSpillVertexBytesThisFrame = 0L
+            perfSpriteStreamSpillIndexBytesThisFrame = 0L
+            perfSpriteStreamDropsThisFrame = 0
+            perfSpriteStreamDropVertexBytesThisFrame = 0L
+            perfSpriteStreamDropIndexBytesThisFrame = 0L
         }
         textureStagingCursor = 0
         resetDrawBindingCache()
+        traceOffscreenBindLogsThisFrame = 0
+        traceTargetDrawLogsThisFrame = 0
+        traceFb26VertexLogThisFrame = 0
         MemoryStack.stackPush().use { stack ->
             val waitFence = inFlightFences[currentFrame]
             check(VK10.vkWaitForFences(device, waitFence, true, Long.MAX_VALUE), "Failed waiting for Vulkan frame fence.")
+            releaseTransientSpriteBuffers(currentFrame)
 
             val pImageIndex = stack.mallocInt(1)
             val acquireResult = KHRSwapchain.vkAcquireNextImageKHR(
@@ -1265,6 +1645,8 @@ internal class Lwjgl3VulkanRuntime private constructor(
         activeTargetHeight = 0
         frameActive = false
 
+        dumpTraceTexturesIfNeeded()
+
         traceFrameCounter++
         if(traceEnabled){
             if(traceFrameCounter % 60L == 0L){
@@ -1273,7 +1655,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         }
         if(perfTraceEnabled && traceFrameCounter % 120L == 0L){
             Log.info(
-                "Vulkan perf frame @ drawCalls=@ waitIdle=@ oneShotCmd=@ inlineTex=@ staging(recreate=@ allocBytes=@ cap=@) defaultFxFallback=@",
+                "Vulkan perf frame @ drawCalls=@ waitIdle=@ oneShotCmd=@ inlineTex=@ staging(recreate=@ allocBytes=@ cap=@) streamSpill(draws=@ vtxBytes=@ idxBytes=@) streamDrop(draws=@ vtxBytes=@ idxBytes=@) defaultFxFallback=@",
                 traceFrameCounter,
                 traceDrawCallsThisFrame,
                 perfWaitIdleCallsThisFrame,
@@ -1282,8 +1664,95 @@ internal class Lwjgl3VulkanRuntime private constructor(
                 perfTextureStagingRecreateThisFrame,
                 perfTextureStagingAllocBytesThisFrame,
                 textureStagingCapacity,
+                perfSpriteStreamSpillsThisFrame,
+                perfSpriteStreamSpillVertexBytesThisFrame,
+                perfSpriteStreamSpillIndexBytesThisFrame,
+                perfSpriteStreamDropsThisFrame,
+                perfSpriteStreamDropVertexBytesThisFrame,
+                perfSpriteStreamDropIndexBytesThisFrame,
                 perfDefaultEffectFallbackThisFrame
             )
+        }
+    }
+
+    private fun dumpTraceTexturesIfNeeded(){
+        if(!traceEnabled || tracePendingTextureDumpIds.isEmpty()) return
+        val toDump = ArrayList<Int>(tracePendingTextureDumpIds)
+        tracePendingTextureDumpIds.clear()
+        for(textureId in toDump){
+            if(traceDumpedGpuTextures.contains(textureId)) continue
+            val texture = spriteTextures[textureId] ?: continue
+            try{
+                waitIdle()
+                dumpTextureImage(textureId, texture)
+                traceDumpedGpuTextures.add(textureId)
+            }catch(t: Throwable){
+                Log.info("Vulkan trace texture dump failed id=@ reason=@", textureId, t.toString())
+            }
+        }
+    }
+
+    private fun dumpTextureImage(textureId: Int, texture: SpriteTexture){
+        val width = texture.width
+        val height = texture.height
+        if(width <= 0 || height <= 0) return
+        if(width > 4096 || height > 4096) return
+        val byteCount = width * height * 4
+        if(byteCount <= 0) return
+
+        val staging = createHostVisibleBuffer(byteCount, VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+        try{
+            runSingleTimeCommands { cmd, stack ->
+                transitionImageLayoutCmd(cmd, stack, texture.image, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+
+                val copyRegion = VkBufferImageCopy.calloc(1, stack)
+                copyRegion[0]
+                    .bufferOffset(0)
+                    .bufferRowLength(0)
+                    .bufferImageHeight(0)
+                copyRegion[0].imageSubresource()
+                    .aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT)
+                    .mipLevel(0)
+                    .baseArrayLayer(0)
+                    .layerCount(1)
+                copyRegion[0].imageOffset().set(0, 0, 0)
+                copyRegion[0].imageExtent().set(width, height, 1)
+
+                VK10.vkCmdCopyImageToBuffer(
+                    cmd,
+                    texture.image,
+                    VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    staging.buffer,
+                    copyRegion
+                )
+
+                transitionImageLayoutCmd(cmd, stack, texture.image, VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+            }
+
+            val mapped = staging.mapped
+            mapped.position(0)
+            mapped.limit(byteCount)
+            val image = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+            for(y in 0 until height){
+                val dstY = height - 1 - y
+                val rowBase = y * width * 4
+                for(x in 0 until width){
+                    val index = rowBase + x * 4
+                    val r = mapped.get(index).toInt() and 0xFF
+                    val g = mapped.get(index + 1).toInt() and 0xFF
+                    val b = mapped.get(index + 2).toInt() and 0xFF
+                    val a = mapped.get(index + 3).toInt() and 0xFF
+                    image.setRGB(x, dstY, (a shl 24) or (r shl 16) or (g shl 8) or b)
+                }
+            }
+
+            val outDir = File(System.getProperty("java.io.tmpdir"), "arc-vk-debug")
+            outDir.mkdirs()
+            val outFile = File(outDir, "gpu-texture-$textureId-${width}x$height.png")
+            ImageIO.write(image, "png", outFile)
+            Log.info("Vulkan trace gpu texture dump id=@ path=@", textureId, outFile.absolutePath)
+        }finally{
+            destroyHostVisibleBuffer(staging)
         }
     }
 
@@ -1328,6 +1797,66 @@ internal class Lwjgl3VulkanRuntime private constructor(
         val mapped: ByteBuffer
     )
 
+    private data class SpriteDrawSpill(
+        val vertex: HostVisibleBuffer,
+        val index: HostVisibleBuffer
+    )
+
+    private fun copyToMappedBuffer(source: ByteBuffer, bytes: Int, mapped: ByteBuffer, mappedPtr: Long, destinationOffset: Int){
+        if(bytes <= 0) return
+        if(source.isDirect){
+            val srcAddress = MemoryUtil.memAddress(source) + source.position().toLong()
+            MemoryUtil.memCopy(srcAddress, mappedPtr + destinationOffset.toLong(), bytes.toLong())
+            return
+        }
+
+        val src = source.duplicate()
+        val srcLimit = src.limit()
+        src.limit(src.position() + bytes)
+        val dst = mapped.duplicate()
+        dst.position(destinationOffset)
+        dst.limit(destinationOffset + bytes)
+        dst.put(src)
+        src.limit(srcLimit)
+    }
+
+    private fun spillSpriteDrawToTransientBuffers(
+        vertices: ByteBuffer,
+        vertexBytes: Int,
+        indices: ByteBuffer,
+        indexBytes: Int
+    ): SpriteDrawSpill?{
+        var vertexSpill: HostVisibleBuffer? = null
+        var indexSpill: HostVisibleBuffer? = null
+        try{
+            vertexSpill = createHostVisibleBuffer(max(align4(vertexBytes), 4), VK10.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
+            copyToMappedBuffer(vertices, vertexBytes, vertexSpill.mapped, vertexSpill.mappedPtr, 0)
+
+            indexSpill = createHostVisibleBuffer(max(align4(indexBytes), 4), VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
+            copyToMappedBuffer(indices, indexBytes, indexSpill.mapped, indexSpill.mappedPtr, 0)
+            return SpriteDrawSpill(vertexSpill, indexSpill)
+        }catch(_: Throwable){
+            if(indexSpill != null) destroyHostVisibleBuffer(indexSpill)
+            if(vertexSpill != null) destroyHostVisibleBuffer(vertexSpill)
+            return null
+        }
+    }
+
+    private fun releaseTransientSpriteBuffers(frame: Int){
+        if(frame !in 0 until transientSpriteBuffersByFrame.size) return
+        val list = transientSpriteBuffersByFrame[frame]
+        for(buffer in list){
+            destroyHostVisibleBuffer(buffer)
+        }
+        list.clear()
+    }
+
+    private fun releaseAllTransientSpriteBuffers(){
+        for(frame in transientSpriteBuffersByFrame.indices){
+            releaseTransientSpriteBuffers(frame)
+        }
+    }
+
     private fun createSpriteRendererResources(){
         createSpriteDescriptorResources()
         createOffscreenRenderPass()
@@ -1343,6 +1872,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         for(textureId in spriteTextures.keys.toList()){
             destroySpriteTexture(textureId)
         }
+        releaseAllTransientSpriteBuffers()
         destroySpritePipelines()
         destroySpriteBuffers()
         destroyTextureStagingBuffer()
@@ -1529,6 +2059,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
             getSpritePipeline(
                 swapchainTarget = true,
                 shaderVariant = SpriteShaderVariant.Default,
+                vertexLayout = defaultSpriteVertexLayout,
                 blendEnabled = true,
                 blendSrcColor = GL20.GL_SRC_ALPHA,
                 blendDstColor = GL20.GL_ONE_MINUS_SRC_ALPHA,
@@ -1542,6 +2073,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
             getSpritePipeline(
                 swapchainTarget = false,
                 shaderVariant = SpriteShaderVariant.Default,
+                vertexLayout = defaultSpriteVertexLayout,
                 blendEnabled = true,
                 blendSrcColor = GL20.GL_SRC_ALPHA,
                 blendDstColor = GL20.GL_ONE_MINUS_SRC_ALPHA,
@@ -1564,10 +2096,14 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
     private fun createSpritePipeline(targetRenderPass: Long, label: String, shaderVariant: SpriteShaderVariant, blend: SpritePipelineKey): Long{
         MemoryStack.stackPush().use { stack ->
+            val vertexSource = when(shaderVariant){
+                SpriteShaderVariant.ScreenCopy -> screenCopyVertexShaderSource
+                else -> spriteVertexShaderSource
+            }
             val vertShaderModule = createShaderModule(
                 stack,
                 compileShader(
-                    spriteVertexShaderSource,
+                    vertexSource,
                     Shaderc.shaderc_vertex_shader,
                     "sprite-$label.vert"
                 )
@@ -1577,6 +2113,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
                 compileShader(
                     when(shaderVariant){
                         SpriteShaderVariant.Default -> spriteFragmentShaderSource
+                        SpriteShaderVariant.ScreenCopy -> screenCopyFragmentShaderSource
                         SpriteShaderVariant.Shield -> shieldFragmentShaderSource
                         SpriteShaderVariant.BuildBeam -> buildBeamFragmentShaderSource
                     },
@@ -1601,30 +2138,46 @@ internal class Lwjgl3VulkanRuntime private constructor(
             val bindingDescriptions = VkVertexInputBindingDescription.calloc(1, stack)
             bindingDescriptions[0]
                 .binding(0)
-                .stride(spriteVertexStride)
+                .stride(max(1, blend.vertexStride))
                 .inputRate(VK10.VK_VERTEX_INPUT_RATE_VERTEX)
 
-            val attributeDescriptions = VkVertexInputAttributeDescription.calloc(4, stack)
-            attributeDescriptions[0]
-                .binding(0)
-                .location(0)
-                .format(VK10.VK_FORMAT_R32G32_SFLOAT)
-                .offset(0)
-            attributeDescriptions[1]
-                .binding(0)
-                .location(1)
-                .format(VK10.VK_FORMAT_R8G8B8A8_UNORM)
-                .offset(8)
-            attributeDescriptions[2]
-                .binding(0)
-                .location(2)
-                .format(VK10.VK_FORMAT_R32G32_SFLOAT)
-                .offset(12)
-            attributeDescriptions[3]
-                .binding(0)
-                .location(3)
-                .format(VK10.VK_FORMAT_R8G8B8A8_UNORM)
-                .offset(20)
+            val attributeDescriptions = if(shaderVariant == SpriteShaderVariant.ScreenCopy){
+                val attrs = VkVertexInputAttributeDescription.calloc(2, stack)
+                attrs[0]
+                    .binding(0)
+                    .location(0)
+                    .format(VK10.VK_FORMAT_R32G32_SFLOAT)
+                    .offset(max(0, blend.positionOffset))
+                attrs[1]
+                    .binding(0)
+                    .location(2)
+                    .format(VK10.VK_FORMAT_R32G32_SFLOAT)
+                    .offset(max(0, blend.texCoordOffset))
+                attrs
+            }else{
+                val attrs = VkVertexInputAttributeDescription.calloc(4, stack)
+                attrs[0]
+                    .binding(0)
+                    .location(0)
+                    .format(VK10.VK_FORMAT_R32G32_SFLOAT)
+                    .offset(max(0, blend.positionOffset))
+                attrs[1]
+                    .binding(0)
+                    .location(1)
+                    .format(VK10.VK_FORMAT_R8G8B8A8_UNORM)
+                    .offset(max(0, blend.colorOffset))
+                attrs[2]
+                    .binding(0)
+                    .location(2)
+                    .format(VK10.VK_FORMAT_R32G32_SFLOAT)
+                    .offset(max(0, blend.texCoordOffset))
+                attrs[3]
+                    .binding(0)
+                    .location(3)
+                    .format(VK10.VK_FORMAT_R8G8B8A8_UNORM)
+                    .offset(max(0, blend.mixColorOffset))
+                attrs
+            }
 
             val vertexInputInfo = VkPipelineVertexInputStateCreateInfo.calloc(stack)
             vertexInputInfo.sType(VK10.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO)
@@ -2502,8 +3055,8 @@ internal class Lwjgl3VulkanRuntime private constructor(
         private const val maxFramesInFlight = 2
         private const val spriteVertexStride = 24
         private const val spritePushConstantSizeBytes = 24 * 4
-        private const val spriteVertexBufferSize = 32 * 1024 * 1024
-        private const val spriteIndexBufferSize = 16 * 1024 * 1024
+        private const val spriteVertexBufferSize = 64 * 1024 * 1024
+        private const val spriteIndexBufferSize = 32 * 1024 * 1024
         private const val maxSpriteTextures = 8192
         private const val targetSwapchain = 0
         private const val targetOffscreen = 1
@@ -2548,6 +3101,31 @@ void main(){
 }
 """
 
+        private val screenCopyVertexShaderSource = """
+#version 450
+layout(location = 0) in vec2 a_position;
+layout(location = 2) in vec2 a_texCoord0;
+
+layout(location = 0) out vec2 v_texCoords;
+
+layout(push_constant) uniform Push {
+    mat4 u_projTrans;
+    vec2 u_texsize;
+    vec2 u_invsize;
+    float u_time;
+    float u_dp;
+    vec2 u_offset;
+} pc;
+
+void main(){
+    v_texCoords = a_texCoord0;
+    vec4 pos = pc.u_projTrans * vec4(a_position, 0.0, 1.0);
+    pos.y = -pos.y;
+    pos.z = (pos.z + pos.w) * 0.5;
+    gl_Position = pos;
+}
+"""
+
         private val spriteFragmentShaderSource = """
 #version 450
 layout(location = 0) in vec4 v_color;
@@ -2561,6 +3139,19 @@ layout(location = 0) out vec4 outColor;
 void main(){
     vec4 c = texture(u_texture, v_texCoords);
     outColor = v_color * mix(c, vec4(v_mix_color.rgb, c.a), v_mix_color.a);
+}
+"""
+
+        private val screenCopyFragmentShaderSource = """
+#version 450
+layout(location = 0) in vec2 v_texCoords;
+
+layout(set = 0, binding = 0) uniform sampler2D u_texture;
+
+layout(location = 0) out vec4 outColor;
+
+void main(){
+    outColor = texture(u_texture, v_texCoords);
 }
 """
 
