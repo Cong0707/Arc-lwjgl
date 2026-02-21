@@ -35,11 +35,11 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     private var bufferTable = arrayOfNulls<BufferState>(256)
     private val textures = IntMap<TextureState>()
     private val vaos = IntMap<VertexArrayState>()
-    private val framebuffers = HashSet<Int>()
-    private val renderbuffers = HashSet<Int>()
+    private val framebuffers = IntSet()
+    private val renderbuffers = IntSet()
     private val framebufferColorAttachments = IntIntMap()
-    private val framebufferTextures = HashSet<Int>()
-    private val traceDumpedTextures = HashSet<Int>()
+    private val framebufferTextures = IntSet()
+    private val traceDumpedTextures = IntSet()
 
     private val nextShaderId = AtomicInteger(1)
     private val nextProgramId = AtomicInteger(1)
@@ -838,7 +838,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         }
         p.effectKind = detectProgramEffect(fragment)
 
-        val usedLocations = HashSet<Int>()
+        val usedLocations = IntSet()
         var nextLocation = 0
         for(match in attributeRegex.findAll(vertex)){
             val typeName = match.groupValues[1]
@@ -1703,9 +1703,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             return
         }
         val colLoc = program.attribColorLocation
-        val col = if(colLoc < 0){
-            null
-        }else{
+        val col = if(colLoc < 0) null else {
             val state = vao.attributes[colLoc]
             if(state != null && state.enabled) state else null
         }
@@ -1735,9 +1733,8 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         val mix = if(mixLocation >= 0){
             val state = vao.attributes[mixLocation]
             if(state != null && state.enabled) state else null
-        }else{
-            null
-        }
+        }else null
+
         val colorFallback = if(colLoc >= 0) currentAttribColor(colLoc, 0xFFFFFFFF.toInt()) else 0xFFFFFFFF.toInt()
         val mixFallback = if(mixLocation >= 0) currentAttribColor(mixLocation, 0) else 0
 
@@ -1747,11 +1744,11 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         val usesProjectionUniform = program.hasProjectionUniform
         val proj = resolveProjection(program)
         val viewportRelativeFramebufferSample = texState != null
-            && texState.width > 0
-            && texState.height > 0
-            && (texState.width < max(1, viewportWidthState) || texState.height < max(1, viewportHeightState))
+                && texState.width > 0
+                && texState.height > 0
+                && (texState.width < max(1, viewportWidthState) || texState.height < max(1, viewportHeightState))
         val flipFramebufferTextureV = framebufferTextures.contains(textureId)
-            && ((!usesProjectionUniform || isIdentityProjection(proj)) || viewportRelativeFramebufferSample)
+                && ((!usesProjectionUniform || isIdentityProjection(proj)) || viewportRelativeFramebufferSample)
         if(traceEnabled && flipFramebufferTextureV){
             traceFlipFramebufferTextureThisFrame++
         }
@@ -1769,7 +1766,6 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         val stencilReadPass = isStencilReadPass(colorMaskedOut, stencilWritePass)
 
         if(colorMaskedOut && !stencilWritePass){
-            // No color output expected and this draw is not contributing to stencil mask.
             if(traceEnabled && stencilReadPass){
                 traceStencilDroppedThisFrame++
             }
@@ -1778,13 +1774,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
 
         if(traceEnabled){
             if(proj[5] >= 0f) traceProjM11Pos++ else traceProjM11Neg++
-        }
-        if(traceEnabled){
-            if(program.usesProjectionViewUniform){
-                traceDrawProjView++
-            }else{
-                traceDrawProjTrans++
-            }
+            if(program.usesProjectionViewUniform) traceDrawProjView++ else traceDrawProjTrans++
         }
 
         val triangleCount = triangles.size
@@ -1846,8 +1836,8 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             }
             val indexRangeCount = maxTriangleIndex - minTriangleIndex + 1
             val useRangePath = minTriangleIndex >= 0
-                && indexRangeCount > 0
-                && indexRangeCount <= triangleCount * 3
+                    && indexRangeCount > 0
+                    && indexRangeCount <= triangleCount * 3
 
             if(useRangePath){
                 uniqueCount = indexRangeCount
@@ -1859,9 +1849,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
                 for(i in 0 until triangleCount){
                     val index = triangles.items[i]
                     val existing = vertexRemap.get(index, Int.MIN_VALUE)
-                    val mapped = if(existing != Int.MIN_VALUE){
-                        existing
-                    }else{
+                    val mapped = if(existing != Int.MIN_VALUE) existing else {
                         val created = uniqueVertices.size
                         uniqueVertices.add(index)
                         vertexRemap.put(index, created)
@@ -1875,17 +1863,17 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             outIndexType = if(useUInt32Indices) GL20.GL_UNSIGNED_INT else GL20.GL_UNSIGNED_SHORT
             val indexBytesPer = if(useUInt32Indices) 4 else 2
             ensureIndexScratchCapacity(triangleCount * indexBytesPer)
-            outIndices = indexScratch.duplicate().order(ByteOrder.nativeOrder())
+
+            // Optimisation: Replaced .duplicate() to prevent GC thrashing per draw call
+            outIndices = indexScratch
             outIndices.clear()
+            outIndices.order(ByteOrder.nativeOrder())
             outIndices.limit(triangleCount * indexBytesPer)
+
             if(useRangePath){
                 for(i in 0 until triangleCount){
                     val mapped = triangles.items[i] - minTriangleIndex
-                    if(useUInt32Indices){
-                        outIndices.putInt(mapped)
-                    }else{
-                        outIndices.putShort(mapped.toShort())
-                    }
+                    if(useUInt32Indices) outIndices.putInt(mapped) else outIndices.putShort(mapped.toShort())
                 }
             }else{
                 for(i in 0 until triangleCount){
@@ -1894,118 +1882,127 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
                         if(traceEnabled) traceSkipRead++
                         return
                     }
-                    if(useUInt32Indices){
-                        outIndices.putInt(mapped)
-                    }else{
-                        outIndices.putShort(mapped.toShort())
-                    }
+                    if(useUInt32Indices) outIndices.putInt(mapped) else outIndices.putShort(mapped.toShort())
                 }
             }
             outIndices.flip()
 
             ensureVertexScratchCapacity(uniqueCount * spriteStride)
-            outVertices = vertexScratch.duplicate().order(ByteOrder.nativeOrder())
+
+            // Optimisation: Replaced .duplicate() here as well
+            outVertices = vertexScratch
             outVertices.clear()
+            outVertices.order(ByteOrder.nativeOrder())
             outVertices.limit(uniqueCount * spriteStride)
+
             outVertexLayout = defaultSpriteVertexLayout
             val interleavedDecode = buildInterleavedDecodeStateIfPossible(pos, col, uv, mix)
             if(perfTraceEnabled && interleavedDecode != null){
                 perfDecodedInterleavedFastDrawsThisFrame++
             }
-            val posResolved = resolveAttrib(pos) ?: run{
-                if(traceEnabled) traceSkipRead++
-                return
-            }
-            val uvResolved = resolveAttrib(uv) ?: run{
-                if(traceEnabled) traceSkipRead++
-                return
-            }
-            val colResolved = resolveAttrib(col)
-            if(col != null && colResolved == null){
-                if(traceEnabled) traceSkipRead++
-                return
-            }
-            val mixResolved = resolveAttrib(mix)
-            if(mix != null && mixResolved == null){
-                if(traceEnabled) traceSkipRead++
-                return
-            }
 
-            for(i in 0 until uniqueCount){
-                val index = if(useRangePath) minTriangleIndex + i else uniqueVertices.items[i]
-                val c: Int
-                val m: Int
-                if(interleavedDecode != null){
-                    val base = index * interleavedDecode.stride
-                    val posOffset = base + interleavedDecode.posOffset
-                    val uvOffset = base + interleavedDecode.uvOffset
-                    if(posOffset < 0
-                        || uvOffset < 0
-                        || posOffset + 8 > interleavedDecode.data.limit()
-                        || uvOffset + 8 > interleavedDecode.data.limit()){
+            val posResolved = resolveAttrib(pos) ?: run { if(traceEnabled) traceSkipRead++; return }
+            val uvResolved = resolveAttrib(uv) ?: run { if(traceEnabled) traceSkipRead++; return }
+            val colResolved = resolveAttrib(col)
+            if(col != null && colResolved == null) { if(traceEnabled) traceSkipRead++; return }
+            val mixResolved = resolveAttrib(mix)
+            if(mix != null && mixResolved == null) { if(traceEnabled) traceSkipRead++; return }
+
+            // Optimisation: Loop unswitching. Split the inner loop into dedicated paths.
+            if (interleavedDecode != null) {
+                val decData = interleavedDecode.data
+                val decLimit = decData.limit()
+                val decStride = interleavedDecode.stride
+                val decPosOff = interleavedDecode.posOffset
+                val decUvOff = interleavedDecode.uvOffset
+                val decColOff = interleavedDecode.colorOffset
+                val decMixOff = interleavedDecode.mixOffset
+                val decHasColor = interleavedDecode.hasColor
+                val decHasMix = interleavedDecode.hasMix
+
+                for(i in 0 until uniqueCount){
+                    val index = if(useRangePath) minTriangleIndex + i else uniqueVertices.items[i]
+                    val base = index * decStride
+                    val pOff = base + decPosOff
+                    val uOff = base + decUvOff
+
+                    if(pOff < 0 || uOff < 0 || pOff + 8 > decLimit || uOff + 8 > decLimit){
                         if(traceEnabled) traceSkipRead++
                         return
                     }
-                    posScratch[0] = interleavedDecode.data.getFloat(posOffset)
-                    posScratch[1] = interleavedDecode.data.getFloat(posOffset + 4)
-                    uvScratch[0] = interleavedDecode.data.getFloat(uvOffset)
-                    uvScratch[1] = interleavedDecode.data.getFloat(uvOffset + 4)
-                    c = if(interleavedDecode.hasColor){
-                        val colorOffset = base + interleavedDecode.colorOffset
-                        if(colorOffset < 0 || colorOffset + 4 > interleavedDecode.data.limit()){
-                            if(traceEnabled) traceSkipRead++
-                            return
-                        }
-                        interleavedDecode.data.getInt(colorOffset)
-                    }else{
-                        colorFallback
-                    }
-                    m = if(interleavedDecode.hasMix){
-                        val mixOffset = base + interleavedDecode.mixOffset
-                        if(mixOffset < 0 || mixOffset + 4 > interleavedDecode.data.limit()){
-                            if(traceEnabled) traceSkipRead++
-                            return
-                        }
-                        interleavedDecode.data.getInt(mixOffset)
-                    }else{
-                        mixFallback
-                    }
-                }else{
-                    if(!readVec2Resolved(posResolved, index, posScratch)){
-                        if(traceEnabled) traceSkipRead++
-                        return
-                    }
-                    if(!readVec2Resolved(uvResolved, index, uvScratch)){
-                        if(traceEnabled) traceSkipRead++
-                        return
-                    }
-                    c = readColorResolved(colResolved, index, colorFallback) ?: run{
-                        if(traceEnabled) traceSkipRead++
-                        return
-                    }
-                    m = readColorResolved(mixResolved, index, mixFallback) ?: run{
-                        if(traceEnabled) traceSkipRead++
-                        return
+
+                    val px = decData.getFloat(pOff)
+                    val py = decData.getFloat(pOff + 4)
+                    val u = decData.getFloat(uOff)
+                    val v = decData.getFloat(uOff + 4)
+
+                    val c = if(decHasColor) {
+                        val cOff = base + decColOff
+                        if(cOff < 0 || cOff + 4 > decLimit){ if(traceEnabled) traceSkipRead++; return }
+                        decData.getInt(cOff)
+                    } else colorFallback
+
+                    val m = if(decHasMix) {
+                        val mOff = base + decMixOff
+                        if(mOff < 0 || mOff + 4 > decLimit){ if(traceEnabled) traceSkipRead++; return }
+                        decData.getInt(mOff)
+                    } else mixFallback
+
+                    outVertices.putFloat(px)
+                    outVertices.putFloat(py)
+                    outVertices.putInt(c)
+                    outVertices.putFloat(u)
+                    val submittedV = if(flipFramebufferTextureV) 1f - v else v
+                    outVertices.putFloat(submittedV)
+                    outVertices.putInt(m)
+
+                    if(stencilWritePass) accumulateStencilMaskBounds(px, py, proj)
+
+                    // Optimisation: Only calculate bounds tracking if tracing is actually enabled
+                    if(traceEnabled) {
+                        if(px < minX) minX = px
+                        if(px > maxX) maxX = px
+                        if(py < minY) minY = py
+                        if(py > maxY) maxY = py
+                        if(u < minU) minU = u
+                        if(u > maxU) maxU = u
+                        if(submittedV < minV) minV = submittedV
+                        if(submittedV > maxV) maxV = submittedV
                     }
                 }
-                outVertices.putFloat(posScratch[0])
-                outVertices.putFloat(posScratch[1])
-                outVertices.putInt(c)
-                outVertices.putFloat(uvScratch[0])
-                val submittedV = if(flipFramebufferTextureV) 1f - uvScratch[1] else uvScratch[1]
-                outVertices.putFloat(submittedV)
-                outVertices.putInt(m)
-                if(posScratch[0] < minX) minX = posScratch[0]
-                if(posScratch[0] > maxX) maxX = posScratch[0]
-                if(posScratch[1] < minY) minY = posScratch[1]
-                if(posScratch[1] > maxY) maxY = posScratch[1]
-                if(uvScratch[0] < minU) minU = uvScratch[0]
-                if(uvScratch[0] > maxU) maxU = uvScratch[0]
-                if(submittedV < minV) minV = submittedV
-                if(submittedV > maxV) maxV = submittedV
+            } else {
+                for(i in 0 until uniqueCount){
+                    val index = if(useRangePath) minTriangleIndex + i else uniqueVertices.items[i]
+                    if(!readVec2Resolved(posResolved, index, posScratch)){ if(traceEnabled) traceSkipRead++; return }
+                    if(!readVec2Resolved(uvResolved, index, uvScratch)){ if(traceEnabled) traceSkipRead++; return }
+                    val c = readColorResolved(colResolved, index, colorFallback) ?: run{ if(traceEnabled) traceSkipRead++; return }
+                    val m = readColorResolved(mixResolved, index, mixFallback) ?: run{ if(traceEnabled) traceSkipRead++; return }
 
-                if(stencilWritePass){
-                    accumulateStencilMaskBounds(posScratch[0], posScratch[1], proj)
+                    val px = posScratch[0]
+                    val py = posScratch[1]
+                    val u = uvScratch[0]
+                    val v = uvScratch[1]
+
+                    outVertices.putFloat(px)
+                    outVertices.putFloat(py)
+                    outVertices.putInt(c)
+                    outVertices.putFloat(u)
+                    val submittedV = if(flipFramebufferTextureV) 1f - v else v
+                    outVertices.putFloat(submittedV)
+                    outVertices.putInt(m)
+
+                    if(stencilWritePass) accumulateStencilMaskBounds(px, py, proj)
+
+                    if(traceEnabled) {
+                        if(px < minX) minX = px
+                        if(px > maxX) maxX = px
+                        if(py < minY) minY = py
+                        if(py > maxY) maxY = py
+                        if(u < minU) minU = u
+                        if(u > maxU) maxU = u
+                        if(submittedV < minV) minV = submittedV
+                        if(submittedV > maxV) maxV = submittedV
+                    }
                 }
             }
             outVertices.flip()
@@ -2061,27 +2058,10 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             val tex = texState
             Log.info(
                 "VkCompat fboDraw frame=@ prog=@ tex=@ texSize=@x@ flip=@ projU=@ ident=@ m00=@ m11=@ m30=@ m31=@ bounds=[@,@]-[@,@] uv=[@,@]-[@,@] fb=@",
-                traceFrameCounter,
-                program.id,
-                textureId,
-                tex?.width ?: 0,
-                tex?.height ?: 0,
-                flipFramebufferTextureV,
-                usesProjectionUniform,
-                isIdentityProjection(proj),
-                proj[0],
-                proj[5],
-                proj[12],
-                proj[13],
-                minX,
-                minY,
-                maxX,
-                maxY,
-                minU,
-                minV,
-                maxU,
-                maxV,
-                currentFramebuffer
+                traceFrameCounter, program.id, textureId, tex?.width ?: 0, tex?.height ?: 0,
+                flipFramebufferTextureV, usesProjectionUniform, isIdentityProjection(proj),
+                proj[0], proj[5], proj[12], proj[13],
+                minX, minY, maxX, maxY, minU, minV, maxU, maxV, currentFramebuffer
             )
         }
         if(traceEnabled
@@ -2091,46 +2071,15 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             traceProgram41DrawLogsThisFrame++
             Log.info(
                 "VkCompat prog41 frame=@ tex=@ texFmt(i=@ f=@ t=@) texSize=@x@ fb=@ vp=[@,@ @x@] sc=[enabled=@ set=@ @,@ @x@] blend=[@ sf=@ df=@ sa=@ da=@ eq=@/@] projU=@ m00=@ m11=@ m30=@ m31=@ bounds=[@,@]-[@,@] uv=[@,@]-[@,@] alpha=[@,@]",
-                traceFrameCounter,
-                textureId,
-                texState?.internalFormat ?: 0,
-                texState?.format ?: 0,
-                texState?.type ?: 0,
-                texState?.width ?: 0,
-                texState?.height ?: 0,
-                currentFramebuffer,
-                viewportXState,
-                viewportYState,
-                viewportWidthState,
-                viewportHeightState,
-                scissorEnabledState,
-                scissorSetState,
-                scissorXState,
-                scissorYState,
-                scissorWidthState,
-                scissorHeightState,
-                enabledCaps.contains(GL20.GL_BLEND),
-                blendSrcColor,
-                blendDstColor,
-                blendSrcAlpha,
-                blendDstAlpha,
-                blendEqColor,
-                blendEqAlpha,
-                usesProjectionUniform,
-                proj[0],
-                proj[5],
-                proj[12],
-                proj[13],
-                if(hasBounds) minX else Float.NaN,
-                if(hasBounds) minY else Float.NaN,
-                if(hasBounds) maxX else Float.NaN,
-                if(hasBounds) maxY else Float.NaN,
-                if(hasBounds) minU else Float.NaN,
-                if(hasBounds) minV else Float.NaN,
-                if(hasBounds) maxU else Float.NaN,
-                if(hasBounds) maxV else Float.NaN,
-                colorAlphaRange?.getOrNull(0) ?: Float.NaN,
-                colorAlphaRange?.getOrNull(1) ?: Float.NaN
+                traceFrameCounter, textureId, texState?.internalFormat ?: 0, texState?.format ?: 0, texState?.type ?: 0,
+                texState?.width ?: 0, texState?.height ?: 0, currentFramebuffer,
+                viewportXState, viewportYState, viewportWidthState, viewportHeightState,
+                scissorEnabledState, scissorSetState, scissorXState, scissorYState, scissorWidthState, scissorHeightState,
+                enabledCaps.contains(GL20.GL_BLEND), blendSrcColor, blendDstColor, blendSrcAlpha, blendDstAlpha, blendEqColor, blendEqAlpha,
+                usesProjectionUniform, proj[0], proj[5], proj[12], proj[13],
+                if(hasBounds) minX else Float.NaN, if(hasBounds) minY else Float.NaN, if(hasBounds) maxX else Float.NaN, if(hasBounds) maxY else Float.NaN,
+                if(hasBounds) minU else Float.NaN, if(hasBounds) minV else Float.NaN, if(hasBounds) maxU else Float.NaN, if(hasBounds) maxV else Float.NaN,
+                colorAlphaRange?.getOrNull(0) ?: Float.NaN, colorAlphaRange?.getOrNull(1) ?: Float.NaN
             )
         }
         val attachmentTexture = framebufferColorAttachments.get(currentFramebuffer, 0)
@@ -2148,32 +2097,11 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             val colorAlpha = sampleAttributeAlphaRange(outVertices, uniqueCount, outVertexLayout.stride, outVertexLayout.colorOffset)
             Log.info(
                 "VkCompat fboWrite frame=@ fb=@ attTex=@ attSize=@x@ projU=@ ident=@ blend=[@ sf=@ df=@ sa=@ da=@] m00=@ m11=@ m30=@ m31=@ bounds=[@,@]-[@,@] uv=[@,@]-[@,@] colorA=[@,@]",
-                traceFrameCounter,
-                currentFramebuffer,
-                attachmentTexture,
-                attachmentWidth,
-                attachmentHeight,
-                usesProjectionUniform,
-                isIdentityProjection(proj),
-                enabledCaps.contains(GL20.GL_BLEND),
-                blendSrcColor,
-                blendDstColor,
-                blendSrcAlpha,
-                blendDstAlpha,
-                proj[0],
-                proj[5],
-                proj[12],
-                proj[13],
-                minX,
-                minY,
-                maxX,
-                maxY,
-                minU,
-                minV,
-                maxU,
-                maxV,
-                colorAlpha[0],
-                colorAlpha[1]
+                traceFrameCounter, currentFramebuffer, attachmentTexture, attachmentWidth, attachmentHeight,
+                usesProjectionUniform, isIdentityProjection(proj), enabledCaps.contains(GL20.GL_BLEND),
+                blendSrcColor, blendDstColor, blendSrcAlpha, blendDstAlpha,
+                proj[0], proj[5], proj[12], proj[13], minX, minY, maxX, maxY, minU, minV, maxU, maxV,
+                colorAlpha[0], colorAlpha[1]
             )
         }
         if(traceEnabled && (traceFrameCounter % 60L == 0L) && traceDrawOrderLogsThisFrame < 16){
@@ -2182,82 +2110,31 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             val mixAlpha = sampleAttributeAlphaRange(outVertices, uniqueCount, outVertexLayout.stride, outVertexLayout.mixColorOffset)
             val color0 = samplePackedColor(outVertices, outVertexLayout.stride, outVertexLayout.colorOffset)
             val mix0 = samplePackedColor(outVertices, outVertexLayout.stride, outVertexLayout.mixColorOffset)
-            val texAlpha = if(hasBounds && texState != null){
-                sampleTextureAlphaRange(texState, minU, minV, maxU, maxV, false)
-            }else{
-                floatArrayOf(Float.NaN, Float.NaN)
-            }
-            val texAlphaFlip = if(hasBounds && texState != null){
-                sampleTextureAlphaRange(texState, minU, minV, maxU, maxV, true)
-            }else{
-                floatArrayOf(Float.NaN, Float.NaN)
-            }
+            val texAlpha = if(hasBounds && texState != null) sampleTextureAlphaRange(texState, minU, minV, maxU, maxV, false) else floatArrayOf(Float.NaN, Float.NaN)
+            val texAlphaFlip = if(hasBounds && texState != null) sampleTextureAlphaRange(texState, minU, minV, maxU, maxV, true) else floatArrayOf(Float.NaN, Float.NaN)
             Log.info(
                 "VkCompat drawOrder frame=@ order=@ prog=@ tex=@ texFmt(i=@ f=@ t=@) fb=@ shader=@ flipFbo=@ bounds=[@,@]-[@,@] uv=[@,@]-[@,@] texA=[@,@] texAFlip=[@,@] colorA=[@,@] mixA=[@,@] color0=0x@ mix0=0x@",
-                traceFrameCounter,
-                traceDrawOrderLogsThisFrame,
-                program.id,
-                textureId,
-                texState?.internalFormat ?: -1,
-                texState?.format ?: -1,
-                texState?.type ?: -1,
-                currentFramebuffer,
-                shaderVariant,
-                flipFramebufferTextureV,
-                if(hasBounds) minX else Float.NaN,
-                if(hasBounds) minY else Float.NaN,
-                if(hasBounds) maxX else Float.NaN,
-                if(hasBounds) maxY else Float.NaN,
-                if(hasBounds) minU else Float.NaN,
-                if(hasBounds) minV else Float.NaN,
-                if(hasBounds) maxU else Float.NaN,
-                if(hasBounds) maxV else Float.NaN,
-                texAlpha[0],
-                texAlpha[1],
-                texAlphaFlip[0],
-                texAlphaFlip[1],
-                colorAlpha[0],
-                colorAlpha[1],
-                mixAlpha[0],
-                mixAlpha[1],
-                java.lang.Integer.toHexString(color0),
-                java.lang.Integer.toHexString(mix0)
+                traceFrameCounter, traceDrawOrderLogsThisFrame, program.id, textureId,
+                texState?.internalFormat ?: -1, texState?.format ?: -1, texState?.type ?: -1,
+                currentFramebuffer, shaderVariant, flipFramebufferTextureV,
+                if(hasBounds) minX else Float.NaN, if(hasBounds) minY else Float.NaN, if(hasBounds) maxX else Float.NaN, if(hasBounds) maxY else Float.NaN,
+                if(hasBounds) minU else Float.NaN, if(hasBounds) minV else Float.NaN, if(hasBounds) maxU else Float.NaN, if(hasBounds) maxV else Float.NaN,
+                texAlpha[0], texAlpha[1], texAlphaFlip[0], texAlphaFlip[1], colorAlpha[0], colorAlpha[1], mixAlpha[0], mixAlpha[1],
+                java.lang.Integer.toHexString(color0), java.lang.Integer.toHexString(mix0)
             )
         }
         if(traceEnabled && (currentFramebuffer == 26 || textureId == 83)){
             Log.info(
                 "VkCompat submitDraw frame=@ fb=@ tex=@ vtx=@ idx=@ idxType=@",
-                traceFrameCounter,
-                currentFramebuffer,
-                textureId,
-                uniqueCount,
-                triangleCount,
-                outIndexType
+                traceFrameCounter, currentFramebuffer, textureId, uniqueCount, triangleCount, outIndexType
             )
         }
         vk.setCurrentFramebuffer(currentFramebuffer)
         vk.drawSprite(
-            outVertices,
-            uniqueCount,
-            outVertexLayout,
-            outIndices,
-            outIndexType,
-            triangleCount,
-            textureId,
-            proj,
-            shaderVariant,
-            effectUniforms,
-            enabledCaps.contains(GL20.GL_BLEND),
-            blendSrcColor,
-            blendDstColor,
-            blendSrcAlpha,
-            blendDstAlpha,
-            blendEqColor,
-            blendEqAlpha,
-            blendColorR,
-            blendColorG,
-            blendColorB,
-            blendColorA
+            outVertices, uniqueCount, outVertexLayout, outIndices, outIndexType, triangleCount, textureId,
+            proj, shaderVariant, effectUniforms, enabledCaps.contains(GL20.GL_BLEND),
+            blendSrcColor, blendDstColor, blendSrcAlpha, blendDstAlpha, blendEqColor, blendEqAlpha,
+            blendColorR, blendColorG, blendColorB, blendColorA
         )
         if(traceEnabled){
             traceProgramDrawCounts.increment(program.id, 1)
@@ -3868,13 +3745,17 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             && source.contains("u_time")
         if(!hasEffectUniforms) return ProgramEffectKind.Default
 
-        val isShield = compact.contains("vec4maxed=max(")
-            && compact.contains("if(texture(u_texture,t).a<0.9&&maxed.a>0.9)")
-            && compact.contains("color.a=0.18;")
+        val isShield = (compact.contains("vec4maxed=max(") || compact.contains("maxed=max("))
+            && compact.contains("maxed.a>0.9")
+            && (compact.contains("color.a=alpha;") || compact.contains("color.a=0.18;"))
+            && (compact.contains("sin(coords.y/3.0+u_time/20.0)")
+            || compact.contains("sin(coords.y/3.0+pc.u_time/20.0)"))
         if(isShield) return ProgramEffectKind.Shield
 
         val isBuildBeam = compact.contains("color.a*=(0.37+")
-            && compact.contains("step(mod(coords.x/dp+coords.y/dp+pc.u_time/4.0,10.0),3.0)")
+            && compact.contains("abs(sin(")
+            && (compact.contains("mod(coords.x/u_dp+coords.y/u_dp+u_time/4.0,10.0)")
+            || compact.contains("mod(coords.x/dp+coords.y/dp+pc.u_time/4.0,10.0)"))
         if(isBuildBeam) return ProgramEffectKind.BuildBeam
 
         return ProgramEffectKind.Default
