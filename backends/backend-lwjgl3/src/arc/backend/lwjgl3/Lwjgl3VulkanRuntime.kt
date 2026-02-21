@@ -170,6 +170,10 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private var spriteIndexCursor = 0
     private val transientSpriteBuffersByFrame = Array(maxFramesInFlight){ ArrayList<HostVisibleBuffer>() }
     private val pooledHostVisibleBuffers = HashMap<Long, ArrayDeque<HostVisibleBuffer>>()
+    private var spillVertexPage: HostVisibleBuffer? = null
+    private var spillVertexPageCursor = 0
+    private var spillIndexPage: HostVisibleBuffer? = null
+    private var spillIndexPageCursor = 0
 
     private val spriteTextures = HashMap<Int, SpriteTexture>()
     private var textureStagingBuffer = VK10.VK_NULL_HANDLE
@@ -1108,12 +1112,10 @@ internal class Lwjgl3VulkanRuntime private constructor(
                 return
             }
 
-            transientSpriteBuffersByFrame[currentFrame].add(spilled.vertex)
-            transientSpriteBuffersByFrame[currentFrame].add(spilled.index)
-            vertexOffset = 0
-            indexOffset = 0
-            boundVertexBuffer = spilled.vertex.buffer
-            boundIndexBuffer = spilled.index.buffer
+            vertexOffset = spilled.vertexOffset
+            indexOffset = spilled.indexOffset
+            boundVertexBuffer = spilled.vertexBuffer
+            boundIndexBuffer = spilled.indexBuffer
             if(perfTraceEnabled){
                 perfSpriteStreamSpillsThisFrame++
                 perfSpriteStreamSpillVertexBytesThisFrame += vertexBytes.toLong()
@@ -1825,9 +1827,16 @@ internal class Lwjgl3VulkanRuntime private constructor(
         val pooled: Boolean
     )
 
+    private data class SpillSlice(
+        val page: HostVisibleBuffer,
+        val offset: Int
+    )
+
     private data class SpriteDrawSpill(
-        val vertex: HostVisibleBuffer,
-        val index: HostVisibleBuffer
+        val vertexBuffer: Long,
+        val vertexOffset: Int,
+        val indexBuffer: Long,
+        val indexOffset: Int
     )
 
     private fun copyToMappedBuffer(source: ByteBuffer, bytes: Int, mapped: ByteBuffer, mappedPtr: Long, destinationOffset: Int){
@@ -1854,19 +1863,51 @@ internal class Lwjgl3VulkanRuntime private constructor(
         indices: ByteBuffer,
         indexBytes: Int
     ): SpriteDrawSpill?{
-        var vertexSpill: HostVisibleBuffer? = null
-        var indexSpill: HostVisibleBuffer? = null
         try{
-            vertexSpill = acquirePooledHostVisibleBuffer(vertexBytes, VK10.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
-            copyToMappedBuffer(vertices, vertexBytes, vertexSpill.mapped, vertexSpill.mappedPtr, 0)
+            val vertexSlice = allocateSpillSlice(vertexBytes, VK10.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, spillVertexPageSizeBytes, true) ?: return null
+            copyToMappedBuffer(vertices, vertexBytes, vertexSlice.page.mapped, vertexSlice.page.mappedPtr, vertexSlice.offset)
 
-            indexSpill = acquirePooledHostVisibleBuffer(indexBytes, VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
-            copyToMappedBuffer(indices, indexBytes, indexSpill.mapped, indexSpill.mappedPtr, 0)
-            return SpriteDrawSpill(vertexSpill, indexSpill)
+            val indexSlice = allocateSpillSlice(indexBytes, VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT, spillIndexPageSizeBytes, false) ?: return null
+            copyToMappedBuffer(indices, indexBytes, indexSlice.page.mapped, indexSlice.page.mappedPtr, indexSlice.offset)
+            return SpriteDrawSpill(
+                vertexBuffer = vertexSlice.page.buffer,
+                vertexOffset = vertexSlice.offset,
+                indexBuffer = indexSlice.page.buffer,
+                indexOffset = indexSlice.offset
+            )
         }catch(_: Throwable){
-            if(indexSpill != null) recycleHostVisibleBuffer(indexSpill)
-            if(vertexSpill != null) recycleHostVisibleBuffer(vertexSpill)
             return null
+        }
+    }
+
+    private fun allocateSpillSlice(requiredBytes: Int, usage: Int, defaultPageBytes: Int, vertexPage: Boolean): SpillSlice?{
+        val bytes = max(align4(requiredBytes), 4)
+        if(bytes <= 0) return null
+
+        if(vertexPage){
+            var page = spillVertexPage
+            if(page == null || spillVertexPageCursor + bytes > page.capacity){
+                val pageSize = nextPow2(max(bytes, defaultPageBytes))
+                page = acquirePooledHostVisibleBuffer(pageSize, usage)
+                spillVertexPage = page
+                spillVertexPageCursor = 0
+                transientSpriteBuffersByFrame[currentFrame].add(page)
+            }
+            val offset = spillVertexPageCursor
+            spillVertexPageCursor += bytes
+            return SpillSlice(page, offset)
+        }else{
+            var page = spillIndexPage
+            if(page == null || spillIndexPageCursor + bytes > page.capacity){
+                val pageSize = nextPow2(max(bytes, defaultPageBytes))
+                page = acquirePooledHostVisibleBuffer(pageSize, usage)
+                spillIndexPage = page
+                spillIndexPageCursor = 0
+                transientSpriteBuffersByFrame[currentFrame].add(page)
+            }
+            val offset = spillIndexPageCursor
+            spillIndexPageCursor += bytes
+            return SpillSlice(page, offset)
         }
     }
 
@@ -1877,6 +1918,12 @@ internal class Lwjgl3VulkanRuntime private constructor(
             recycleHostVisibleBuffer(buffer)
         }
         list.clear()
+        if(frame == currentFrame){
+            spillVertexPage = null
+            spillVertexPageCursor = 0
+            spillIndexPage = null
+            spillIndexPageCursor = 0
+        }
     }
 
     private fun releaseAllTransientSpriteBuffers(){
@@ -3130,6 +3177,8 @@ internal class Lwjgl3VulkanRuntime private constructor(
         private const val spritePushConstantSizeBytes = 24 * 4
         private const val spriteVertexBufferSize = 64 * 1024 * 1024
         private const val spriteIndexBufferSize = 32 * 1024 * 1024
+        private const val spillVertexPageSizeBytes = 4 * 1024 * 1024
+        private const val spillIndexPageSizeBytes = 2 * 1024 * 1024
         private const val maxSpriteTextures = 8192
         private const val maxPooledHostVisibleBuffersPerBucket = 8
         private const val targetSwapchain = 0

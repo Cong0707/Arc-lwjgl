@@ -74,6 +74,11 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     private var indexScratch = ByteBuffer.allocateDirect(1024).order(ByteOrder.nativeOrder())
     private var textureUploadScratch = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder())
     private var textureConvertScratch = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder())
+    private val resolvedPosState = ResolvedAttribState()
+    private val resolvedUvState = ResolvedAttribState()
+    private val resolvedColorState = ResolvedAttribState()
+    private val resolvedMixState = ResolvedAttribState()
+    private val interleavedDecodeState = InterleavedDecodeState()
 
     private var traceFrameCounter = 0L
     private var traceDrawCallsThisFrame = 0
@@ -1901,12 +1906,12 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
                 perfDecodedInterleavedFastDrawsThisFrame++
             }
 
-            val posResolved = resolveAttrib(pos) ?: run { if(traceEnabled) traceSkipRead++; return }
-            val uvResolved = resolveAttrib(uv) ?: run { if(traceEnabled) traceSkipRead++; return }
-            val colResolved = resolveAttrib(col)
-            if(col != null && colResolved == null) { if(traceEnabled) traceSkipRead++; return }
-            val mixResolved = resolveAttrib(mix)
-            if(mix != null && mixResolved == null) { if(traceEnabled) traceSkipRead++; return }
+            if(!resolveAttribInto(pos, resolvedPosState)) { if(traceEnabled) traceSkipRead++; return }
+            if(!resolveAttribInto(uv, resolvedUvState)) { if(traceEnabled) traceSkipRead++; return }
+            val hasColorResolved = if(col != null) resolveAttribInto(col, resolvedColorState) else false
+            if(col != null && !hasColorResolved) { if(traceEnabled) traceSkipRead++; return }
+            val hasMixResolved = if(mix != null) resolveAttribInto(mix, resolvedMixState) else false
+            if(mix != null && !hasMixResolved) { if(traceEnabled) traceSkipRead++; return }
 
             // Optimisation: Loop unswitching. Split the inner loop into dedicated paths.
             if (interleavedDecode != null) {
@@ -1973,10 +1978,10 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             } else {
                 for(i in 0 until uniqueCount){
                     val index = if(useRangePath) minTriangleIndex + i else uniqueVertices.items[i]
-                    if(!readVec2Resolved(posResolved, index, posScratch)){ if(traceEnabled) traceSkipRead++; return }
-                    if(!readVec2Resolved(uvResolved, index, uvScratch)){ if(traceEnabled) traceSkipRead++; return }
-                    val c = readColorResolved(colResolved, index, colorFallback) ?: run{ if(traceEnabled) traceSkipRead++; return }
-                    val m = readColorResolved(mixResolved, index, mixFallback) ?: run{ if(traceEnabled) traceSkipRead++; return }
+                    if(!readVec2Resolved(resolvedPosState, index, posScratch)){ if(traceEnabled) traceSkipRead++; return }
+                    if(!readVec2Resolved(resolvedUvState, index, uvScratch)){ if(traceEnabled) traceSkipRead++; return }
+                    val c = readColorResolved(if(hasColorResolved) resolvedColorState else null, index, colorFallback) ?: run{ if(traceEnabled) traceSkipRead++; return }
+                    val m = readColorResolved(if(hasMixResolved) resolvedMixState else null, index, mixFallback) ?: run{ if(traceEnabled) traceSkipRead++; return }
 
                     val px = posScratch[0]
                     val py = posScratch[1]
@@ -2203,16 +2208,16 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         val mode: FastPathMode
     )
 
-    private data class InterleavedDecodeState(
-        val data: ByteBuffer,
-        val stride: Int,
-        val posOffset: Int,
-        val uvOffset: Int,
-        val colorOffset: Int,
-        val mixOffset: Int,
-        val hasColor: Boolean,
-        val hasMix: Boolean
-    )
+    private class InterleavedDecodeState{
+        lateinit var data: ByteBuffer
+        var stride: Int = 0
+        var posOffset: Int = 0
+        var uvOffset: Int = 0
+        var colorOffset: Int = 0
+        var mixOffset: Int = 0
+        var hasColor: Boolean = false
+        var hasMix: Boolean = false
+    }
 
     private fun buildDirectSpriteSubmissionIfPossible(
         triangles: IntSeq,
@@ -2643,45 +2648,43 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         if(mix != null && mix.bufferId != bufferId) return null
 
         val data = getBufferState(bufferId)?.data ?: return null
-        return InterleavedDecodeState(
-            data = data,
-            stride = stride,
-            posOffset = pos.pointer,
-            uvOffset = uv.pointer,
-            colorOffset = col?.pointer ?: 0,
-            mixOffset = mix?.pointer ?: 0,
-            hasColor = col != null,
-            hasMix = mix != null
-        )
+        interleavedDecodeState.data = data
+        interleavedDecodeState.stride = stride
+        interleavedDecodeState.posOffset = pos.pointer
+        interleavedDecodeState.uvOffset = uv.pointer
+        interleavedDecodeState.colorOffset = col?.pointer ?: 0
+        interleavedDecodeState.mixOffset = mix?.pointer ?: 0
+        interleavedDecodeState.hasColor = col != null
+        interleavedDecodeState.hasMix = mix != null
+        return interleavedDecodeState
     }
 
-    private data class ResolvedAttribState(
-        val data: ByteBuffer,
-        val pointer: Int,
-        val stride: Int,
-        val size: Int,
-        val type: Int,
-        val normalized: Boolean,
-        val componentSize: Int,
-        val limit: Int
-    )
+    private class ResolvedAttribState{
+        lateinit var data: ByteBuffer
+        var pointer: Int = 0
+        var stride: Int = 0
+        var size: Int = 0
+        var type: Int = 0
+        var normalized: Boolean = false
+        var componentSize: Int = 0
+        var limit: Int = 0
+    }
 
-    private fun resolveAttrib(attrib: VertexAttribState?): ResolvedAttribState?{
-        if(attrib == null) return null
-        val buffer = getBufferState(attrib.bufferId) ?: return null
+    private fun resolveAttribInto(attrib: VertexAttribState?, out: ResolvedAttribState): Boolean{
+        if(attrib == null) return false
+        val buffer = getBufferState(attrib.bufferId) ?: return false
         val stride = attrib.effectiveStride()
         val componentSize = bytesPerVertexType(attrib.type)
-        if(stride <= 0 || componentSize <= 0) return null
-        return ResolvedAttribState(
-            data = buffer.data,
-            pointer = attrib.pointer,
-            stride = stride,
-            size = attrib.size,
-            type = attrib.type,
-            normalized = attrib.normalized,
-            componentSize = componentSize,
-            limit = buffer.data.limit()
-        )
+        if(stride <= 0 || componentSize <= 0) return false
+        out.data = buffer.data
+        out.pointer = attrib.pointer
+        out.stride = stride
+        out.size = attrib.size
+        out.type = attrib.type
+        out.normalized = attrib.normalized
+        out.componentSize = componentSize
+        out.limit = buffer.data.limit()
+        return true
     }
 
     private fun readVec2Resolved(attrib: ResolvedAttribState, vertex: Int, out: FloatArray): Boolean{
@@ -2973,15 +2976,17 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         val bytesPer = bytesPerIndex(type)
         if(offset < 0 || offset + count * bytesPer > buffer.limit()) return false
 
-        val view = buffer.duplicate().order(ByteOrder.nativeOrder())
+        if(buffer.order() != ByteOrder.nativeOrder()){
+            buffer.order(ByteOrder.nativeOrder())
+        }
         out.clear()
         out.ensureCapacity(count)
         var pos = offset
         for(i in 0 until count){
             val index = when(type){
-                GL20.GL_UNSIGNED_BYTE -> view.get(pos).toInt() and 0xFF
-                GL20.GL_UNSIGNED_SHORT -> view.getShort(pos).toInt() and 0xFFFF
-                GL20.GL_UNSIGNED_INT -> view.getInt(pos)
+                GL20.GL_UNSIGNED_BYTE -> buffer.get(pos).toInt() and 0xFF
+                GL20.GL_UNSIGNED_SHORT -> buffer.getShort(pos).toInt() and 0xFFFF
+                GL20.GL_UNSIGNED_INT -> buffer.getInt(pos)
                 else -> return false
             }
             out.add(index)
@@ -2997,28 +3002,31 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         return when(type){
             GL20.GL_UNSIGNED_BYTE -> {
                 val bytes = buffer as? ByteBuffer ?: return false
-                val view = bytes.duplicate()
-                if(view.remaining() < count) return false
+                val base = bytes.position()
+                if(bytes.limit() - base < count) return false
                 for(i in 0 until count){
-                    out.add(view.get().toInt() and 0xFF)
+                    out.add(bytes.get(base + i).toInt() and 0xFF)
                 }
                 true
             }
             GL20.GL_UNSIGNED_SHORT -> {
                 when(buffer){
                     is ShortBuffer -> {
-                        val view = buffer.duplicate()
-                        if(view.remaining() < count) return false
+                        val base = buffer.position()
+                        if(buffer.limit() - base < count) return false
                         for(i in 0 until count){
-                            out.add(view.get().toInt() and 0xFFFF)
+                            out.add(buffer.get(base + i).toInt() and 0xFFFF)
                         }
                         true
                     }
                     is ByteBuffer -> {
-                        val view = buffer.duplicate().order(ByteOrder.nativeOrder())
-                        if(view.remaining() < count * 2) return false
+                        if(buffer.order() != ByteOrder.nativeOrder()){
+                            buffer.order(ByteOrder.nativeOrder())
+                        }
+                        val base = buffer.position()
+                        if(buffer.limit() - base < count * 2) return false
                         for(i in 0 until count){
-                            out.add(view.getShort().toInt() and 0xFFFF)
+                            out.add(buffer.getShort(base + i * 2).toInt() and 0xFFFF)
                         }
                         true
                     }
@@ -3028,18 +3036,21 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             GL20.GL_UNSIGNED_INT -> {
                 when(buffer){
                     is IntBuffer -> {
-                        val view = buffer.duplicate()
-                        if(view.remaining() < count) return false
+                        val base = buffer.position()
+                        if(buffer.limit() - base < count) return false
                         for(i in 0 until count){
-                            out.add(view.get())
+                            out.add(buffer.get(base + i))
                         }
                         true
                     }
                     is ByteBuffer -> {
-                        val view = buffer.duplicate().order(ByteOrder.nativeOrder())
-                        if(view.remaining() < count * 4) return false
+                        if(buffer.order() != ByteOrder.nativeOrder()){
+                            buffer.order(ByteOrder.nativeOrder())
+                        }
+                        val base = buffer.position()
+                        if(buffer.limit() - base < count * 4) return false
                         for(i in 0 until count){
-                            out.add(view.getInt())
+                            out.add(buffer.getInt(base + i * 4))
                         }
                         true
                     }
