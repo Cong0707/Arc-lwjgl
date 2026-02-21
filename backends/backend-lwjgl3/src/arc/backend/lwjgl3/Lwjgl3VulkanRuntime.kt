@@ -156,6 +156,22 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private var spritePipelineLayout = VK10.VK_NULL_HANDLE
     private var spriteDescriptorPool = VK10.VK_NULL_HANDLE
     private val spritePipelines = HashMap<SpritePipelineKey, Long>()
+    private var cachedPipelineValid = false
+    private var cachedPipelineHandle = VK10.VK_NULL_HANDLE
+    private var cachedPipelineTarget = -1
+    private var cachedPipelineVariant = -1
+    private var cachedPipelineStride = -1
+    private var cachedPipelinePosOffset = -1
+    private var cachedPipelineColorOffset = -1
+    private var cachedPipelineTexOffset = -1
+    private var cachedPipelineMixOffset = -1
+    private var cachedPipelineBlendEnabled = false
+    private var cachedPipelineSrcColor = 0
+    private var cachedPipelineDstColor = 0
+    private var cachedPipelineSrcAlpha = 0
+    private var cachedPipelineDstAlpha = 0
+    private var cachedPipelineColorOp = 0
+    private var cachedPipelineAlphaOp = 0
 
     private var spriteVertexBuffer = VK10.VK_NULL_HANDLE
     private var spriteVertexBufferAllocation = VK10.VK_NULL_HANDLE
@@ -1257,9 +1273,72 @@ internal class Lwjgl3VulkanRuntime private constructor(
         blendEqAlpha: Int
     ): Long{
         val renderTarget = if(swapchainTarget) targetSwapchain else targetOffscreen
+        val variant = shaderVariant.ordinal
+        if(matchesCachedPipeline(
+                renderTarget,
+                variant,
+                vertexLayout.stride,
+                vertexLayout.positionOffset,
+                vertexLayout.colorOffset,
+                vertexLayout.texCoordOffset,
+                vertexLayout.mixColorOffset,
+                blendEnabled,
+                blendSrcColor,
+                blendDstColor,
+                blendSrcAlpha,
+                blendDstAlpha,
+                blendEqColor,
+                blendEqAlpha
+            )){
+            return cachedPipelineHandle
+        }
+
+        for(entry in spritePipelines.entries){
+            val key = entry.key
+            if(key.target != renderTarget || key.shaderVariant != variant) continue
+            if(key.vertexStride != vertexLayout.stride
+                || key.positionOffset != vertexLayout.positionOffset
+                || key.colorOffset != vertexLayout.colorOffset
+                || key.texCoordOffset != vertexLayout.texCoordOffset
+                || key.mixColorOffset != vertexLayout.mixColorOffset){
+                continue
+            }
+            if(key.blendEnabled != blendEnabled
+                || key.srcColor != blendSrcColor
+                || key.dstColor != blendDstColor
+                || key.srcAlpha != blendSrcAlpha
+                || key.dstAlpha != blendDstAlpha
+                || key.colorOp != blendEqColor
+                || key.alphaOp != blendEqAlpha){
+                continue
+            }
+            val found = entry.value
+            cachePipelineLookup(
+                renderTarget,
+                variant,
+                vertexLayout.stride,
+                vertexLayout.positionOffset,
+                vertexLayout.colorOffset,
+                vertexLayout.texCoordOffset,
+                vertexLayout.mixColorOffset,
+                blendEnabled,
+                blendSrcColor,
+                blendDstColor,
+                blendSrcAlpha,
+                blendDstAlpha,
+                blendEqColor,
+                blendEqAlpha,
+                found
+            )
+            return found
+        }
+
+        val renderPass = if(swapchainTarget) renderPass else offscreenRenderPass
+        if(renderPass == VK10.VK_NULL_HANDLE) return VK10.VK_NULL_HANDLE
+
         val key = SpritePipelineKey(
             target = renderTarget,
-            shaderVariant = shaderVariant.ordinal,
+            shaderVariant = variant,
             vertexStride = vertexLayout.stride,
             positionOffset = vertexLayout.positionOffset,
             colorOffset = vertexLayout.colorOffset,
@@ -1273,14 +1352,108 @@ internal class Lwjgl3VulkanRuntime private constructor(
             colorOp = blendEqColor,
             alphaOp = blendEqAlpha
         )
-        spritePipelines[key]?.let{ return it }
-
-        val renderPass = if(swapchainTarget) renderPass else offscreenRenderPass
-        if(renderPass == VK10.VK_NULL_HANDLE) return VK10.VK_NULL_HANDLE
-
         val pipeline = createSpritePipeline(renderPass, "target=$renderTarget variant=${shaderVariant.name}", shaderVariant, key)
         spritePipelines[key] = pipeline
+        cachePipelineLookup(
+            renderTarget,
+            variant,
+            vertexLayout.stride,
+            vertexLayout.positionOffset,
+            vertexLayout.colorOffset,
+            vertexLayout.texCoordOffset,
+            vertexLayout.mixColorOffset,
+            blendEnabled,
+            blendSrcColor,
+            blendDstColor,
+            blendSrcAlpha,
+            blendDstAlpha,
+            blendEqColor,
+            blendEqAlpha,
+            pipeline
+        )
         return pipeline
+    }
+
+    private fun matchesCachedPipeline(
+        target: Int,
+        variant: Int,
+        stride: Int,
+        posOffset: Int,
+        colorOffset: Int,
+        texOffset: Int,
+        mixOffset: Int,
+        blendEnabled: Boolean,
+        srcColor: Int,
+        dstColor: Int,
+        srcAlpha: Int,
+        dstAlpha: Int,
+        colorOp: Int,
+        alphaOp: Int
+    ): Boolean{
+        if(!cachedPipelineValid || cachedPipelineHandle == VK10.VK_NULL_HANDLE){
+            return false
+        }
+        return cachedPipelineTarget == target
+            && cachedPipelineVariant == variant
+            && cachedPipelineStride == stride
+            && cachedPipelinePosOffset == posOffset
+            && cachedPipelineColorOffset == colorOffset
+            && cachedPipelineTexOffset == texOffset
+            && cachedPipelineMixOffset == mixOffset
+            && cachedPipelineBlendEnabled == blendEnabled
+            && cachedPipelineSrcColor == srcColor
+            && cachedPipelineDstColor == dstColor
+            && cachedPipelineSrcAlpha == srcAlpha
+            && cachedPipelineDstAlpha == dstAlpha
+            && cachedPipelineColorOp == colorOp
+            && cachedPipelineAlphaOp == alphaOp
+    }
+
+    private fun cachePipelineLookup(
+        target: Int,
+        variant: Int,
+        stride: Int,
+        posOffset: Int,
+        colorOffset: Int,
+        texOffset: Int,
+        mixOffset: Int,
+        blendEnabled: Boolean,
+        srcColor: Int,
+        dstColor: Int,
+        srcAlpha: Int,
+        dstAlpha: Int,
+        colorOp: Int,
+        alphaOp: Int,
+        pipeline: Long
+    ){
+        cachedPipelineValid = true
+        cachedPipelineTarget = target
+        cachedPipelineVariant = variant
+        cachedPipelineStride = stride
+        cachedPipelinePosOffset = posOffset
+        cachedPipelineColorOffset = colorOffset
+        cachedPipelineTexOffset = texOffset
+        cachedPipelineMixOffset = mixOffset
+        cachedPipelineBlendEnabled = blendEnabled
+        cachedPipelineSrcColor = srcColor
+        cachedPipelineDstColor = dstColor
+        cachedPipelineSrcAlpha = srcAlpha
+        cachedPipelineDstAlpha = dstAlpha
+        cachedPipelineColorOp = colorOp
+        cachedPipelineAlphaOp = alphaOp
+        cachedPipelineHandle = pipeline
+    }
+
+    private fun clearPipelineLookupCache(){
+        cachedPipelineValid = false
+        cachedPipelineHandle = VK10.VK_NULL_HANDLE
+        cachedPipelineTarget = -1
+        cachedPipelineVariant = -1
+        cachedPipelineStride = -1
+        cachedPipelinePosOffset = -1
+        cachedPipelineColorOffset = -1
+        cachedPipelineTexOffset = -1
+        cachedPipelineMixOffset = -1
     }
 
     private fun ensureRenderTargetBound(): Boolean{
@@ -2156,6 +2329,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
             }
         }
         spritePipelines.clear()
+        clearPipelineLookupCache()
     }
 
     private fun createSpritePipeline(targetRenderPass: Long, label: String, shaderVariant: SpriteShaderVariant, blend: SpritePipelineKey): Long{
