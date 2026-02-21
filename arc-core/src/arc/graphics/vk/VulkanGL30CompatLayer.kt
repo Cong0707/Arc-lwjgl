@@ -8,6 +8,7 @@ import arc.mock.MockGL20
 import arc.struct.IntIntMap
 import arc.struct.IntMap
 import arc.struct.IntSeq
+import arc.struct.IntSet
 import arc.util.Log
 import java.nio.Buffer
 import java.nio.ByteBuffer
@@ -57,7 +58,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     private var activeTextureUnit = 0
     private val textureUnits = IntArray(maxTextureUnits)
     private val currentAttribValues = FloatArray(maxVertexAttribs * 4)
-    private val enabledCaps = HashSet<Int>()
+    private val enabledCaps = IntSet()
     private val decodedIndices = IntSeq(1024)
     private val triangleIndices = IntSeq(1024)
     private val uniqueVertices = IntSeq(1024)
@@ -853,7 +854,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         }
 
         var nextUniform = 0
-        val allUniforms = LinkedHashMap<String, ProgramUniform>()
+        val allUniforms = HashMap<String, ProgramUniform>()
         for(source in arrayOf(vertex, fragment)){
             for(match in uniformRegex.findAll(source)){
                 val typeName = match.groupValues[1]
@@ -4019,12 +4020,12 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
 
     private data class ProgramState(
         val id: Int,
-        val shaders: MutableSet<Int> = LinkedHashSet(),
-        val boundAttribs: MutableMap<String, Int> = LinkedHashMap(),
+        val shaders: MutableSet<Int> = HashSet(),
+        val boundAttribs: MutableMap<String, Int> = HashMap(),
         val attributes: MutableList<ProgramAttrib> = ArrayList(),
         val uniforms: MutableList<ProgramUniform> = ArrayList(),
-        val attribLocations: MutableMap<String, Int> = LinkedHashMap(),
-        val uniformLocations: MutableMap<String, Int> = LinkedHashMap(),
+        val attribLocations: MutableMap<String, Int> = HashMap(),
+        val uniformLocations: MutableMap<String, Int> = HashMap(),
         val uniformInts: IntIntMap = IntIntMap(),
         val uniformFloats: IntMap<FloatArray> = IntMap(),
         val uniformMat4: IntMap<FloatArray> = IntMap(),
