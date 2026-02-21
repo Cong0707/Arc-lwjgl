@@ -29,14 +29,14 @@ import kotlin.math.min
 open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, private val native: VkNative = VkNative.unsupported(), private val backendName: String = "Vulkan Compat") : MockGL20(), GL30, Vulkan{
     private var lastError = GL20.GL_NO_ERROR
 
-    private val shaders = HashMap<Int, ShaderState>()
-    private val programs = HashMap<Int, ProgramState>()
+    private val shaders = IntMap<ShaderState>()
+    private val programs = IntMap<ProgramState>()
     private var bufferTable = arrayOfNulls<BufferState>(256)
-    private val textures = HashMap<Int, TextureState>()
+    private val textures = IntMap<TextureState>()
     private val vaos = IntMap<VertexArrayState>()
     private val framebuffers = HashSet<Int>()
     private val renderbuffers = HashSet<Int>()
-    private val framebufferColorAttachments = HashMap<Int, Int>()
+    private val framebufferColorAttachments = IntIntMap()
     private val framebufferTextures = HashSet<Int>()
     private val traceDumpedTextures = HashSet<Int>()
 
@@ -435,7 +435,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
 
     override fun glGenTexture(): Int{
         val id = nextTextureId.getAndIncrement()
-        textures[id] = TextureState(id)
+        textures.put(id, TextureState(id))
         return id
     }
 
@@ -444,7 +444,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         textures.remove(texture)
         runtime?.destroyTexture(texture)
         if(framebufferTextures.remove(texture)){
-            val iterator = framebufferColorAttachments.entries.iterator()
+            val iterator = framebufferColorAttachments.entries().iterator()
             while(iterator.hasNext()){
                 val entry = iterator.next()
                 if(entry.value == texture){
@@ -470,7 +470,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
 
     override fun glBindTexture(target: Int, texture: Int){
         if(texture != 0){
-            textures.getOrPut(texture){ TextureState(texture) }.target = target
+            textures.get(texture){ TextureState(texture) }.target = target
         }
         textureUnits[activeTextureUnit] = texture
     }
@@ -496,7 +496,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             return
         }
 
-        val tex = textures.getOrPut(textureId){ TextureState(textureId) }
+        val tex = textures.get(textureId){ TextureState(textureId) }
         tex.width = width
         tex.height = height
         tex.internalFormat = internalformat
@@ -543,7 +543,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         }
 
         val textureId = textureUnits[activeTextureUnit]
-        val tex = textures[textureId] ?: return
+        val tex = textures.get(textureId) ?: return
         if(width <= 0 || height <= 0) return
         if(xoffset < 0 || yoffset < 0 || xoffset + width > tex.width || yoffset + height > tex.height) return
 
@@ -570,7 +570,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         if(target != GL20.GL_TEXTURE_2D) return
         val textureId = textureUnits[activeTextureUnit]
         if(textureId == 0) return
-        val tex = textures.getOrPut(textureId){ TextureState(textureId) }
+        val tex = textures.get(textureId){ TextureState(textureId) }
         when(pname){
             GL20.GL_TEXTURE_MIN_FILTER -> tex.minFilter = param
             GL20.GL_TEXTURE_MAG_FILTER -> tex.magFilter = param
@@ -734,29 +734,29 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
 
     override fun glCreateShader(type: Int): Int{
         val id = nextShaderId.getAndIncrement()
-        shaders[id] = ShaderState(id, type)
+        shaders.put(id, ShaderState(id, type))
         return id
     }
 
     override fun glDeleteShader(shader: Int){
         shaders.remove(shader)
-        for(program in programs.values){
+        for(program in programs.values()){
             program.shaders.remove(shader)
         }
     }
 
     override fun glShaderSource(shader: Int, string: String){
-        shaders[shader]?.source = string
+        shaders.get(shader)?.source = string
     }
 
     override fun glCompileShader(shader: Int){
-        val state = shaders[shader] ?: return
+        val state = shaders.get(shader) ?: return
         state.compiled = state.source.isNotBlank()
         state.infoLog = if(state.compiled) "" else "Empty source."
     }
 
     override fun glGetShaderiv(shader: Int, pname: Int, params: IntBuffer){
-        val state = shaders[shader]
+        val state = shaders.get(shader)
         val value = when(pname){
             GL20.GL_COMPILE_STATUS -> if(state?.compiled == true) GL20.GL_TRUE else GL20.GL_FALSE
             GL20.GL_INFO_LOG_LENGTH -> (state?.infoLog?.length ?: 0) + 1
@@ -768,12 +768,12 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     }
 
     override fun glGetShaderInfoLog(shader: Int): String{
-        return shaders[shader]?.infoLog ?: ""
+        return shaders.get(shader)?.infoLog ?: ""
     }
 
     override fun glCreateProgram(): Int{
         val id = nextProgramId.getAndIncrement()
-        programs[id] = ProgramState(id)
+        programs.put(id, ProgramState(id))
         return id
     }
 
@@ -787,20 +787,20 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
 
     override fun glAttachShader(program: Int, shader: Int){
         if(shaders.containsKey(shader)){
-            programs[program]?.shaders?.add(shader)
+            programs.get(program)?.shaders?.add(shader)
         }
     }
 
     override fun glDetachShader(program: Int, shader: Int){
-        programs[program]?.shaders?.remove(shader)
+        programs.get(program)?.shaders?.remove(shader)
     }
 
     override fun glBindAttribLocation(program: Int, index: Int, name: String){
-        programs[program]?.boundAttribs?.put(name, index)
+        programs.get(program)?.boundAttribs?.put(name, index)
     }
 
     override fun glLinkProgram(program: Int){
-        val p = programs[program] ?: return
+        val p = programs.get(program) ?: return
         p.linked = false
         p.infoLog = ""
         p.attributes.clear()
@@ -820,18 +820,18 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         p.usesProjectionViewUniform = false
 
         for(shaderId in p.shaders){
-            val shader = shaders[shaderId]
+            val shader = shaders.get(shaderId)
             if(shader == null || !shader.compiled){
                 p.infoLog = "Shader $shaderId is not compiled."
                 return
             }
         }
 
-        val vertex = p.shaders.asSequence().mapNotNull { shaders[it] }.firstOrNull { it.type == GL20.GL_VERTEX_SHADER }?.source ?: run{
+        val vertex = p.shaders.asSequence().mapNotNull { shaders.get(it) }.firstOrNull { it.type == GL20.GL_VERTEX_SHADER }?.source ?: run{
             p.infoLog = "Missing vertex shader."
             return
         }
-        val fragment = p.shaders.asSequence().mapNotNull { shaders[it] }.firstOrNull { it.type == GL20.GL_FRAGMENT_SHADER }?.source ?: run{
+        val fragment = p.shaders.asSequence().mapNotNull { shaders.get(it) }.firstOrNull { it.type == GL20.GL_FRAGMENT_SHADER }?.source ?: run{
             p.infoLog = "Missing fragment shader."
             return
         }
@@ -915,7 +915,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             currentProgramStateRef = null
             return
         }
-        val resolved = programs[program]
+        val resolved = programs.get(program)
         if(resolved == null){
             currentProgram = 0
             currentProgramStateRef = null
@@ -926,7 +926,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     }
 
     override fun glGetProgramiv(program: Int, pname: Int, params: IntBuffer){
-        val p = programs[program]
+        val p = programs.get(program)
         val value = when(pname){
             GL20.GL_LINK_STATUS, GL20.GL_VALIDATE_STATUS -> if(p?.linked == true) GL20.GL_TRUE else GL20.GL_FALSE
             GL20.GL_ACTIVE_ATTRIBUTES -> p?.attributes?.size ?: 0
@@ -939,15 +939,15 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     }
 
     override fun glGetProgramInfoLog(program: Int): String{
-        return programs[program]?.infoLog ?: ""
+        return programs.get(program)?.infoLog ?: ""
     }
 
     override fun glGetAttribLocation(program: Int, name: String): Int{
-        return programs[program]?.attribLocations?.get(name) ?: -1
+        return programs.get(program)?.attribLocations?.get(name) ?: -1
     }
 
     override fun glGetUniformLocation(program: Int, name: String): Int{
-        val p = programs[program] ?: return -1
+        val p = programs.get(program) ?: return -1
         p.uniformLocations[name]?.let{ return it }
 
         val left = name.indexOf('[')
@@ -965,27 +965,27 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     }
 
     override fun glGetActiveAttrib(program: Int, index: Int, size: IntBuffer, type: IntBuffer): String{
-        val attrib = programs[program]?.attributes?.getOrNull(index) ?: return ""
+        val attrib = programs.get(program)?.attributes?.getOrNull(index) ?: return ""
         if(size.hasRemaining()) size.put(size.position(), attrib.size)
         if(type.hasRemaining()) type.put(type.position(), attrib.type)
         return attrib.name
     }
 
     override fun glGetActiveUniform(program: Int, index: Int, size: IntBuffer, type: IntBuffer): String{
-        val uniform = programs[program]?.uniforms?.getOrNull(index) ?: return ""
+        val uniform = programs.get(program)?.uniforms?.getOrNull(index) ?: return ""
         if(size.hasRemaining()) size.put(size.position(), uniform.size)
         if(type.hasRemaining()) type.put(type.position(), uniform.type)
         return uniform.name
     }
 
     private fun ensureUniformFloat(program: ProgramState, location: Int, components: Int): FloatArray{
-        val existing = program.uniformFloats[location]
+        val existing = program.uniformFloats.get(location)
         if(existing != null && existing.size >= components){
             return existing
         }
 
         val created = FloatArray(components)
-        program.uniformFloats[location] = created
+        program.uniformFloats.put(location, created)
         if(perfTraceEnabled) perfUniformFloatAllocsThisFrame++
         return created
     }
@@ -1021,10 +1021,10 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     }
 
     private fun putUniformMatrix4(program: ProgramState, location: Int, source: FloatBuffer){
-        val existing = program.uniformMat4[location]
+        val existing = program.uniformMat4.get(location)
         val data = if(existing == null){
             val created = FloatArray(16)
-            program.uniformMat4[location] = created
+            program.uniformMat4.put(location, created)
             if(perfTraceEnabled) perfUniformMat4AllocsThisFrame++
             created
         }else{
@@ -1040,10 +1040,10 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     }
 
     private fun putUniformMatrix4(program: ProgramState, location: Int, source: FloatArray, offset: Int){
-        val existing = program.uniformMat4[location]
+        val existing = program.uniformMat4.get(location)
         val data = if(existing == null){
             val created = FloatArray(16)
-            program.uniformMat4[location] = created
+            program.uniformMat4.put(location, created)
             if(perfTraceEnabled) perfUniformMat4AllocsThisFrame++
             created
         }else{
@@ -1178,7 +1178,9 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
 
     override fun glDeleteFramebuffer(framebuffer: Int){
         framebuffers.remove(framebuffer)
-        if(framebufferColorAttachments.remove(framebuffer) != null){
+        val hadAttachment = framebufferColorAttachments.containsKey(framebuffer)
+        framebufferColorAttachments.remove(framebuffer)
+        if(hadAttachment){
             rebuildFramebufferTextureSet()
         }
         clearStencilMaskBounds(framebuffer)
@@ -1217,8 +1219,8 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             }
             runtime?.setFramebufferColorAttachment(fb, 0, 0, 0)
         }else{
-            framebufferColorAttachments[fb] = texture
-            val tex = textures[texture]
+            framebufferColorAttachments.put(fb, texture)
+            val tex = textures.get(texture)
             if(traceEnabled && (fb == 26 || texture == 83)){
                 Log.info(
                     "VkCompat framebufferTexture2D fb=@ tex=@ texSize=@x@",
@@ -1740,7 +1742,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
 
         val texUnit = if(program.uniformTextureLocation >= 0) program.uniformInts[program.uniformTextureLocation] ?: 0 else 0
         val textureId = if(texUnit in 0 until maxTextureUnits) textureUnits[texUnit] else 0
-        val texState = textures[textureId]
+        val texState = textures.get(textureId)
         val usesProjectionUniform = program.hasProjectionUniform
         val proj = resolveProjection(program)
         val viewportRelativeFramebufferSample = texState != null
@@ -2130,8 +2132,8 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
                 colorAlphaRange?.getOrNull(1) ?: Float.NaN
             )
         }
-        val attachmentTexture = framebufferColorAttachments[currentFramebuffer] ?: 0
-        val attachmentState = textures[attachmentTexture]
+        val attachmentTexture = framebufferColorAttachments.get(currentFramebuffer, 0)
+        val attachmentState = textures.get(attachmentTexture)
         val attachmentWidth = attachmentState?.width ?: 0
         val attachmentHeight = attachmentState?.height ?: 0
         val traceSmallFboWrite = attachmentWidth in 1..160 && attachmentHeight in 1..90
@@ -2824,12 +2826,12 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
 
     private fun resolveProjection(program: ProgramState): FloatArray{
         val projLocation = program.uniformProjectionLocation
-        return program.uniformMat4[projLocation] ?: identity
+        return program.uniformMat4.get(projLocation) ?: identity
     }
 
     private fun uniformFloat(program: ProgramState, name: String, fallback: Float): Float{
         val location = program.uniformLocations[name] ?: return fallback
-        val value = program.uniformFloats[location] ?: return fallback
+        val value = program.uniformFloats.get(location) ?: return fallback
         return value.getOrNull(0) ?: fallback
     }
 
@@ -2840,7 +2842,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
             out[1] = fallbackY
             return
         }
-        val value = program.uniformFloats[location]
+        val value = program.uniformFloats.get(location)
         if(value == null){
             out[0] = fallbackX
             out[1] = fallbackY
@@ -2851,7 +2853,7 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     }
 
     private fun buildEffectUniforms(program: ProgramState, textureId: Int): VkCompatRuntime.EffectUniforms{
-        val tex = textures[textureId]
+        val tex = textures.get(textureId)
         val texWidth = max(1, tex?.width ?: viewportWidthState).toFloat()
         val texHeight = max(1, tex?.height ?: viewportHeightState).toFloat()
 
@@ -3992,8 +3994,8 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
     }
 
     private fun syncFramebufferAttachmentsForTexture(textureId: Int){
-        val tex = textures[textureId] ?: return
-        for(entry in framebufferColorAttachments.entries){
+        val tex = textures.get(textureId) ?: return
+        for(entry in framebufferColorAttachments.entries()){
             if(entry.value == textureId){
                 runtime?.setFramebufferColorAttachment(entry.key, textureId, tex.width, tex.height)
             }
@@ -4002,7 +4004,9 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
 
     private fun rebuildFramebufferTextureSet(){
         framebufferTextures.clear()
-        framebufferTextures.addAll(framebufferColorAttachments.values)
+        for(entry in framebufferColorAttachments.entries()){
+            framebufferTextures.add(entry.value)
+        }
     }
 
     private data class ShaderState(
@@ -4022,8 +4026,8 @@ open class VulkanGL30CompatLayer(protected val runtime: VkCompatRuntime?, privat
         val attribLocations: MutableMap<String, Int> = LinkedHashMap(),
         val uniformLocations: MutableMap<String, Int> = LinkedHashMap(),
         val uniformInts: IntIntMap = IntIntMap(),
-        val uniformFloats: MutableMap<Int, FloatArray> = HashMap(),
-        val uniformMat4: MutableMap<Int, FloatArray> = HashMap(),
+        val uniformFloats: IntMap<FloatArray> = IntMap(),
+        val uniformMat4: IntMap<FloatArray> = IntMap(),
         var effectKind: ProgramEffectKind = ProgramEffectKind.Default,
         var attribPositionLocation: Int = -1,
         var attribColorLocation: Int = -1,
