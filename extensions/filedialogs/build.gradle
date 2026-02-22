@@ -1,24 +1,36 @@
-plugins{
+// 1. 使用 plugins 块替代 apply plugin
+plugins {
     id "com.badlogicgames.jnigen.jnigen-gradle"
 }
+
+file("jni").mkdir()
 
 jnigen{
     sharedLibName = "arc-filedialogs"
     libsDir = "build/natives"
 
     all{
-        headerDirs = ["csrc/"]
-        cIncludes = ["csrc/tinyfiledialogs.c"]
+        cIncludes = ["tinyfiledialogs.c"]
+    }
+
+    // 2. 修改平台添加函数名，并统一添加架构参数 x86
+    addWindows(x32, x86){
+        libraries = " -lcomdlg32 -lole32"
     }
     addWindows(x64, x86){
-        libraries += "-lcomdlg32 -lole32".split(" ")
+        libraries = " -lcomdlg32 -lole32"
     }
+
     addLinux(x64, x86)
     addMac(x64, x86)
+
+    // 3. Mac ARM 的简化处理
+    // 注意：补丁中删除了手动 replace("x86_64", "arm64") 的逻辑
+    // 因为新版插件会根据 ARM 参数自动处理架构标志
     addMac(x64, ARM)
 }
 
-tasks.register('preJni'){
+task preJni{
     doFirst{
         copy{
             from "$rootDir/arc-core/build/classes/java/main"
@@ -27,6 +39,21 @@ tasks.register('preJni'){
         }
     }
 }
+
+task postJni{
+    doLast{
+        copy{
+            from "libs/linux64", "libs/windows32", "libs/windows64", "libs/macosx64"
+            into "../../natives/natives-filedialogs/libs"
+            include "**"
+        }
+    }
+}
+
+preJni.dependsOn "compileJava"
+
+// 4. 关键任务名修改：jnigenBuild -> jnigenBuildHost
+jnigenBuildHost.finalizedBy postJni
 
 getTasksByName("jnigen", true).each{
     it.dependsOn preJni
