@@ -3,7 +3,6 @@ package arc.graphics.vk
 import arc.graphics.GL20
 import arc.graphics.GL30
 import arc.graphics.Vulkan
-import arc.graphics.vk.VkNative
 import arc.mock.MockGL20
 import arc.struct.IntIntMap
 import arc.struct.IntMap
@@ -28,8 +27,7 @@ import kotlin.math.max
 import kotlin.math.min
 
 open class VulkanGL30CompatLayer(
-    protected val runtime: VkCompatRuntime?,
-    private val native: VkNative = VkNative.unsupported(),
+    protected val runtime: Vulkan.Driver?,
     private val backendName: String = "Vulkan Compat"
 ) : MockGL20(), GL30, Vulkan {
 
@@ -99,14 +97,14 @@ open class VulkanGL30CompatLayer(
         ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder()),
         ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder()),
         GL20.GL_UNSIGNED_SHORT, 0,
-        VkCompatRuntime.VertexLayout(0, 0, 0, 0, 0),
+        Vulkan.VertexLayout(0, 0, 0, 0, 0),
         FastPathMode.Packed24,
         null
     )
     // 用于屏幕拷贝路径的可变 layout
-    private val screenCopyLayoutScratch = VkCompatRuntime.VertexLayout(0, 0, -1, 0, -1)
-    private val interleavedLayoutScratch = VkCompatRuntime.VertexLayout(0, 0, 0, 0, 0)
-    private val noMixLayoutScratch = VkCompatRuntime.VertexLayout(0, 0, 0, 0, -1)
+    private val screenCopyLayoutScratch = Vulkan.VertexLayout(0, 0, -1, 0, -1)
+    private val interleavedLayoutScratch = Vulkan.VertexLayout(0, 0, 0, 0, 0)
+    private val noMixLayoutScratch = Vulkan.VertexLayout(0, 0, 0, 0, -1)
 
     // ── Trace / perf 计数器 ──────────────────────────────────────────────────
     private var traceFrameCounter = 0L
@@ -247,6 +245,33 @@ open class VulkanGL30CompatLayer(
     override fun isNativeBackend() = true
     override fun getBackendName() = if (runtime != null) backendName else "$backendName (Unavailable)"
     override fun supportsSpriteBatchFastPath() = runtime != null
+    override fun isReady() = runtime?.isReady() ?: false
+    override fun info() = runtime?.info() ?: VkBackendInfo("Unavailable", "0.0", "N/A", "N/A", "N/A")
+    override fun waitIdle() { runtime?.waitIdle() }
+    override fun createBuffer(usage: Int, size: Long, hostVisible: Boolean): Long {
+        val vk = runtime ?: throw UnsupportedOperationException("Vulkan runtime is unavailable.")
+        return vk.createBuffer(usage, size, hostVisible)
+    }
+    override fun destroyBuffer(buffer: Long) {
+        val vk = runtime ?: throw UnsupportedOperationException("Vulkan runtime is unavailable.")
+        vk.destroyBuffer(buffer)
+    }
+    override fun updateBuffer(buffer: Long, offset: Long, data: Buffer, size: Long) {
+        val vk = runtime ?: throw UnsupportedOperationException("Vulkan runtime is unavailable.")
+        vk.updateBuffer(buffer, offset, data, size)
+    }
+    override fun createImage2D(width: Int, height: Int, format: Int, usage: Int, mipLevels: Int): Long {
+        val vk = runtime ?: throw UnsupportedOperationException("Vulkan runtime is unavailable.")
+        return vk.createImage2D(width, height, format, usage, mipLevels)
+    }
+    override fun destroyImage(image: Long) {
+        val vk = runtime ?: throw UnsupportedOperationException("Vulkan runtime is unavailable.")
+        vk.destroyImage(image)
+    }
+    override fun uploadImage2D(image: Long, width: Int, height: Int, format: Int, data: Buffer) {
+        val vk = runtime ?: throw UnsupportedOperationException("Vulkan runtime is unavailable.")
+        vk.uploadImage2D(image, width, height, format, data)
+    }
 
     override fun drawSpriteBatch(
         texture: arc.graphics.Texture,
@@ -416,8 +441,6 @@ open class VulkanGL30CompatLayer(
             )
         }
     }
-
-    override fun nativeApi(): VkNative = native
 
     fun dispose() { runtime?.dispose() }
 
@@ -1256,7 +1279,7 @@ open class VulkanGL30CompatLayer(
         val outIndices: ByteBuffer
         val outIndexType: Int
         val outVertices: ByteBuffer
-        val outVertexLayout: VkCompatRuntime.VertexLayout
+        val outVertexLayout: Vulkan.VertexLayout
         val uniqueCount: Int
 
         if (directResult != null) {
@@ -1598,10 +1621,10 @@ open class VulkanGL30CompatLayer(
         } else false
 
         val defaultShaderVariant = when (program.effectKind) {
-            ProgramEffectKind.ScreenCopy -> VkCompatRuntime.SpriteShaderVariant.ScreenCopy
-            ProgramEffectKind.Shield -> VkCompatRuntime.SpriteShaderVariant.Shield
-            ProgramEffectKind.BuildBeam -> VkCompatRuntime.SpriteShaderVariant.BuildBeam
-            else -> VkCompatRuntime.SpriteShaderVariant.Default
+            ProgramEffectKind.ScreenCopy -> Vulkan.SpriteShaderVariant.ScreenCopy
+            ProgramEffectKind.Shield -> Vulkan.SpriteShaderVariant.Shield
+            ProgramEffectKind.BuildBeam -> Vulkan.SpriteShaderVariant.BuildBeam
+            else -> Vulkan.SpriteShaderVariant.Default
         }
         val shaderVariant = directResult?.shaderVariantOverride ?: defaultShaderVariant
         if (traceEnabled) {
@@ -1818,7 +1841,7 @@ open class VulkanGL30CompatLayer(
             -minIndex,
             textureId,
             proj,
-            VkCompatRuntime.SpriteShaderVariant.NoMix,
+            Vulkan.SpriteShaderVariant.NoMix,
             null,
             enabledCaps.contains(GL20.GL_BLEND),
             blendSrcColor,
@@ -1897,9 +1920,9 @@ open class VulkanGL30CompatLayer(
         var indices: ByteBuffer,
         var indexType: Int,
         var vertexCount: Int,
-        var layout: VkCompatRuntime.VertexLayout,
+        var layout: Vulkan.VertexLayout,
         var mode: FastPathMode,
-        var shaderVariantOverride: VkCompatRuntime.SpriteShaderVariant?
+        var shaderVariantOverride: Vulkan.SpriteShaderVariant?
     )
 
     private class InterleavedDecodeState {
@@ -2027,8 +2050,8 @@ open class VulkanGL30CompatLayer(
             flipVComponentInUNorm16VertexScratch(out, vertexCount, stride, uvOffset)
         }
         val outIndices = buildRemappedIndicesScratch(triangles, minIndex, vertexCount) ?: return null
-        val layout = VkCompatRuntime.VertexLayout(stride, posOffset, colOffset, uvOffset, -1)
-        return fillDirectResult(out, outIndices, vertexCount, layout, FastPathMode.NoMixU16Norm, VkCompatRuntime.SpriteShaderVariant.NoMix)
+        val layout = Vulkan.VertexLayout(stride, posOffset, colOffset, uvOffset, -1)
+        return fillDirectResult(out, outIndices, vertexCount, layout, FastPathMode.NoMixU16Norm, Vulkan.SpriteShaderVariant.NoMix)
     }
 
     private fun buildScreenCopyPosUvSubmissionIfPossible(
@@ -2090,8 +2113,8 @@ open class VulkanGL30CompatLayer(
     /** 填充复用的 DirectSpriteSubmission 对象 */
     private fun fillDirectResult(
         vertices: ByteBuffer, indices: ByteBuffer, vertexCount: Int,
-        layout: VkCompatRuntime.VertexLayout, mode: FastPathMode,
-        shaderVariantOverride: VkCompatRuntime.SpriteShaderVariant? = null
+        layout: Vulkan.VertexLayout, mode: FastPathMode,
+        shaderVariantOverride: Vulkan.SpriteShaderVariant? = null
     ): DirectSpriteSubmission {
         val indexType = if (vertexCount > 0xFFFF) GL20.GL_UNSIGNED_INT else GL20.GL_UNSIGNED_SHORT
         directSubmissionPool.vertices = vertices; directSubmissionPool.indices = indices
@@ -2368,7 +2391,7 @@ open class VulkanGL30CompatLayer(
         out[0] = value.getOrNull(0) ?: fallbackX; out[1] = value.getOrNull(1) ?: fallbackY
     }
 
-    private fun buildEffectUniforms(program: ProgramState, textureId: Int): VkCompatRuntime.EffectUniforms {
+    private fun buildEffectUniforms(program: ProgramState, textureId: Int): Vulkan.EffectUniforms {
         val tex = textures.get(textureId)
         val texWidth = max(1, tex?.width ?: viewportWidthState).toFloat()
         val texHeight = max(1, tex?.height ?: viewportHeightState).toFloat()
@@ -2379,7 +2402,7 @@ open class VulkanGL30CompatLayer(
         uniformVec2(program, "u_offset", 0f, 0f, effectOffsetScratch)
         val time = uniformFloat(program, "u_time", 0f)
         val dp = max(1e-4f, uniformFloat(program, "u_dp", 1f))
-        return VkCompatRuntime.EffectUniforms(
+        return Vulkan.EffectUniforms(
             effectTexSizeScratch[0], effectTexSizeScratch[1],
             effectInvSizeScratch[0], effectInvSizeScratch[1],
             time, dp, effectOffsetScratch[0], effectOffsetScratch[1])
@@ -2465,7 +2488,7 @@ open class VulkanGL30CompatLayer(
     //  采样辅助（trace 用）
     // ══════════════════════════════════════════════════════════════════════════
 
-    private fun sampleColorAlphaRange(vertices: ByteBuffer, vertexCount: Int, layout: VkCompatRuntime.VertexLayout): FloatArray {
+    private fun sampleColorAlphaRange(vertices: ByteBuffer, vertexCount: Int, layout: Vulkan.VertexLayout): FloatArray {
         if (vertexCount <= 0) return floatArrayOf(Float.NaN, Float.NaN)
         if (layout.colorOffset < 0) return floatArrayOf(1f, 1f)
         val stride = max(1, layout.stride); val limit = vertices.limit()
@@ -3281,7 +3304,7 @@ open class VulkanGL30CompatLayer(
         private const val GL_COLOR_ATTACHMENT0 = 0x8CE0
         private const val DEFAULT_WHITE_TEXTURE_ID = 0
 
-        private val defaultSpriteVertexLayout = VkCompatRuntime.VertexLayout(SPRITE_STRIDE, 0, 8, 12, 20)
+        private val defaultSpriteVertexLayout = Vulkan.VertexLayout(SPRITE_STRIDE, 0, 8, 12, 20)
 
         private val identity = floatArrayOf(
             1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f
