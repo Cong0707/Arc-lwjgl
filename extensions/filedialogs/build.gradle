@@ -1,4 +1,7 @@
-apply plugin: "com.badlogicgames.gdx.gdx-jnigen"
+// 1. 使用 plugins 块替代 apply plugin
+plugins {
+    id "com.badlogicgames.jnigen.jnigen-gradle"
+}
 
 file("jni").mkdir()
 
@@ -8,25 +11,27 @@ jnigen{
     libsDir = file("libs").absolutePath
 
     all{
-        //headerDirs += ["$fdir/"]
         cIncludes = ["tinyfiledialogs.c"]
     }
-    add(Windows, x32){
+
+    // 2. 修改平台添加函数名，并统一添加架构参数 x86
+    addWindows(x32, x86){
         libraries = " -lcomdlg32 -lole32"
     }
-    add(Windows, x64){
+    addWindows(x64, x86){
         libraries = " -lcomdlg32 -lole32"
     }
-    add(Linux, x64)
-    add(MacOsX, x64)
-    add(MacOsX, x64, ARM){
-        cFlags = cppFlags = cppFlags.replace("x86_64", "arm64")
-        linkerFlags = linkerFlags.replace("x86_64", "arm64")
-    }
+
+    addLinux(x64, x86)
+    addMac(x64, x86)
+
+    // 3. Mac ARM 的简化处理
+    // 注意：补丁中删除了手动 replace("x86_64", "arm64") 的逻辑
+    // 因为新版插件会根据 ARM 参数自动处理架构标志
+    addMac(x64, ARM)
 }
 
 task preJni{
-
     doFirst{
         copy{
             from "$rootDir/arc-core/build/classes/java/main"
@@ -42,7 +47,6 @@ task preJni{
     }
 }
 
-//copies files into the right locations
 task postJni{
     doLast{
         copy{
@@ -54,7 +58,9 @@ task postJni{
 }
 
 preJni.dependsOn "compileJava"
-jnigenBuild.finalizedBy postJni
+
+// 4. 关键任务名修改：jnigenBuild -> jnigenBuildHost
+jnigenBuildHost.finalizedBy postJni
 
 getTasksByName("jnigen", true).each{
     it.dependsOn preJni

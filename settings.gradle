@@ -1,4 +1,10 @@
 pluginManagement {
+    repositories {
+        mavenCentral()
+        google()
+        gradlePluginPortal()
+        maven { url "https://jitpack.io" }
+    }
     plugins {
         id 'org.jetbrains.kotlin.jvm' version '2.0.21'
     }

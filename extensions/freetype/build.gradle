@@ -1,4 +1,7 @@
-apply plugin: "com.badlogicgames.gdx.gdx-jnigen"
+// 1. 替换插件声明
+plugins {
+    id "com.badlogicgames.jnigen.jnigen-gradle"
+}
 
 file("jni").mkdir()
 
@@ -12,42 +15,44 @@ jnigen{
     all{
         headerDirs +=  (String[])["$fdir/include"]
         cIncludes = [
-            //BASE
-            "$fdir/src/base/ftsystem.c", "$fdir/src/base/ftinit.c", "$fdir/src/base/ftdebug.c",
-            "$fdir/src/base/ftbase.c", "$fdir/src/base/ftbbox.c", "$fdir/src/base/ftglyph.c",
-            "$fdir/src/base/ftbitmap.c", "$fdir/src/base/ftstroke.c",
-            "$fdir/src/base/ftmm.c",
+                //BASE
+                "$fdir/src/base/ftsystem.c", "$fdir/src/base/ftinit.c", "$fdir/src/base/ftdebug.c",
+                "$fdir/src/base/ftbase.c", "$fdir/src/base/ftbbox.c", "$fdir/src/base/ftglyph.c",
+                "$fdir/src/base/ftbitmap.c", "$fdir/src/base/ftstroke.c",
+                "$fdir/src/base/ftmm.c",
 
-            //DRIVERS
-            "$fdir/src/truetype/truetype.c", "$fdir/src/sfnt/sfnt.c",
+                //DRIVERS
+                "$fdir/src/truetype/truetype.c", "$fdir/src/sfnt/sfnt.c",
 
-            //RASTERIZERS
-            "$fdir/src/smooth/smooth.c",
+                //RASTERIZERS
+                "$fdir/src/smooth/smooth.c",
 
-            //AUX
-            "$fdir/src/autofit/autofit.c", "$fdir/src/gzip/ftgzip.c",
-            "$fdir/src/psnames/psnames.c"
+                //AUX
+                "$fdir/src/autofit/autofit.c", "$fdir/src/gzip/ftgzip.c",
+                "$fdir/src/psnames/psnames.c"
         ]
 
         cFlags += " -DFT2_BUILD_LIBRARY"
         cppFlags += " -DFT2_BUILD_LIBRARY"
     }
-    add(Windows, x32)
-    add(Windows, x64)
-    add(Linux, x64)
-    add(MacOsX, x64)
-    add(MacOsX, x64, ARM){
-        cFlags = cppFlags = cppFlags.replace("x86_64", "arm64")
-        linkerFlags = linkerFlags.replace("x86_64", "arm64")
-    }
-    add(Android){
+
+    // 2. 更新桌面平台函数名
+    addWindows(x32, x86)
+    addWindows(x64, x86)
+    addLinux(x64, x86)
+    addMac(x64, x86)
+
+    // 3. 简化 Mac ARM，移除旧的手动字符串 replace 逻辑
+    addMac(x64, ARM)
+
+    // 4. 更新移动平台函数名
+    addAndroid(){
         linkerFlags += " -Wl,-z,max-page-size=0x4000"
     }
-    add(IOS)
+    addIOS()
 }
 
 task preJni{
-
     doFirst{
         copy{
             from "$rootDir/arc-core/build/classes/java/main"
@@ -57,7 +62,7 @@ task preJni{
 
         if(!file("$project.rootDir/extensions/freetype/jni/freetype-2.14.1").exists()){
             println "Fetching freetype source..."
-
+            // ... (此处 wget/tar 逻辑保持不变) ...
             def root = "$project.rootDir/extensions/freetype"
             new File("$root/jni").mkdir()
             def script = "wget -c https://download.savannah.gnu.org/releases/freetype/freetype-2.14.1.tar.gz -O $root/jni/freetype.tar.gz\n" +
@@ -67,9 +72,8 @@ task preJni{
             scriptFile.text = script
             "bash $scriptFile.absolutePath".execute().waitFor()
 
-            //overwrite config to use only certain modules.
             file("$root/jni/freetype-2.14.1/include/freetype/config/ftmodule.h").text =
-            """
+                    """
             FT_USE_MODULE( FT_Module_Class, autofit_module_class )
             FT_USE_MODULE( FT_Driver_ClassRec, tt_driver_class )
             FT_USE_MODULE( FT_Module_Class, psnames_module_class )
@@ -80,7 +84,6 @@ task preJni{
     }
 }
 
-//copies files into the right locations
 task postJni{
     doLast{
         copy{
@@ -106,7 +109,9 @@ task postJni{
 }
 
 preJni.dependsOn "compileJava"
-jnigenBuild.finalizedBy postJni
+
+// 5. 关键修改：任务钩子改为 jnigenBuildHost
+jnigenBuildHost.finalizedBy postJni
 
 getTasksByName("jnigen", true).each{
     it.dependsOn preJni
