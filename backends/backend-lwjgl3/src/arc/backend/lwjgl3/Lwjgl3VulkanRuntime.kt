@@ -104,7 +104,8 @@ internal class Lwjgl3VulkanRuntime private constructor(
     val presentQueueFamily: Int,
     val graphicsQueue: VkQueue,
     val presentQueue: VkQueue,
-    val allocator: Long
+    val allocator: Long,
+    private val supportsMultiDrawIndirect: Boolean
 ){
     private var swapchain: Long = VK10.VK_NULL_HANDLE
     private var swapchainFormat: Int = VK10.VK_FORMAT_B8G8R8A8_UNORM
@@ -149,6 +150,9 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private var perfSpriteStreamDropIndexBytesThisFrame = 0L
     private var perfSpriteBatchFastPathDrawsThisFrame = 0
     private var perfSpriteBatchFastPathSpritesThisFrame = 0
+    private var perfIndirectCallsThisFrame = 0
+    private var perfIndirectDrawsThisFrame = 0
+    private var perfIndirectFallbackDrawsThisFrame = 0
     private var perfHostBufferPoolHitsThisFrame = 0
     private var perfHostBufferPoolMissesThisFrame = 0
     private var perfHostBufferPoolRecycleThisFrame = 0
@@ -190,6 +194,11 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private var spriteQuadIndexAllocation = VK10.VK_NULL_HANDLE
     private var spriteQuadIndexMapped: ByteBuffer? = null
     private var spriteQuadIndexCapacitySprites = 0
+    private var spriteIndirectBuffer = VK10.VK_NULL_HANDLE
+    private var spriteIndirectAllocation = VK10.VK_NULL_HANDLE
+    private var spriteIndirectMapped: ByteBuffer? = null
+    private var spriteIndirectCapacityBytes = 0
+    private var spriteIndirectCursor = 0
     private val transientSpriteBuffersByFrame = Array(maxFramesInFlight){ ArrayList<HostVisibleBuffer>() }
     private val pooledHostVisibleBuffers = HashMap<Long, ArrayDeque<HostVisibleBuffer>>()
     private var spillVertexPage: HostVisibleBuffer? = null
@@ -239,6 +248,20 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private var boundBlendColorG = Float.NaN
     private var boundBlendColorB = Float.NaN
     private var boundBlendColorA = Float.NaN
+    private var pendingIndirectActive = false
+    private var pendingIndirectPipeline = VK10.VK_NULL_HANDLE
+    private var pendingIndirectDescriptorSet = VK10.VK_NULL_HANDLE
+    private var pendingIndirectVertexBuffer = VK10.VK_NULL_HANDLE
+    private var pendingIndirectIndexBuffer = VK10.VK_NULL_HANDLE
+    private var pendingIndirectIndexType = VK10.VK_INDEX_TYPE_UINT16
+    private var pendingIndirectBlendColorR = 0f
+    private var pendingIndirectBlendColorG = 0f
+    private var pendingIndirectBlendColorB = 0f
+    private var pendingIndirectBlendColorA = 0f
+    private var pendingIndirectCommandOffsetBytes = 0
+    private var pendingIndirectCommandCount = 0
+    private val pendingPushConstants = FloatArray(spritePushConstantFloatCount)
+    private var pendingPushConstantsValid = false
     private val tracePendingTextureDumpIds = LinkedHashSet<Int>()
     private val traceDumpedGpuTextures = HashSet<Int>()
     private var traceOffscreenBindLogsThisFrame = 0
@@ -352,6 +375,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
         if(!ensureRenderTargetBound()) return
         val commandBuffer = currentCommandBuffer ?: return
+        flushPendingIndirectDraws(commandBuffer)
         clearActiveColorAttachment(commandBuffer, clearR, clearG, clearB, clearA)
     }
 
@@ -381,6 +405,10 @@ internal class Lwjgl3VulkanRuntime private constructor(
     }
 
     fun setCurrentFramebuffer(framebuffer: Int){
+        val cmd = currentCommandBuffer
+        if(frameActive && cmd != null){
+            flushPendingIndirectDraws(cmd)
+        }
         if(traceEnabled && (framebuffer == 26 || currentFramebuffer == 26)){
             Log.info("Vulkan setCurrentFramebuffer old=@ new=@ frame=@ active=@", currentFramebuffer, framebuffer, traceFrameCounter, frameActive)
         }
@@ -389,6 +417,10 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
     fun setFramebufferColorAttachment(framebuffer: Int, textureId: Int, width: Int, height: Int){
         if(framebuffer == 0) return
+        val cmd = currentCommandBuffer
+        if(frameActive && cmd != null){
+            flushPendingIndirectDraws(cmd)
+        }
         if(traceEnabled && (framebuffer == 26 || textureId == 83)){
             Log.info(
                 "Vulkan setFramebufferColorAttachment fb=@ tex=@ size=@x@",
@@ -417,6 +449,10 @@ internal class Lwjgl3VulkanRuntime private constructor(
     }
 
     fun removeFramebuffer(framebuffer: Int){
+        val cmd = currentCommandBuffer
+        if(frameActive && cmd != null){
+            flushPendingIndirectDraws(cmd)
+        }
         framebufferAttachments.remove(framebuffer)
         destroyOffscreenTarget(framebuffer)
     }
@@ -430,6 +466,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
         val cmd = currentCommandBuffer ?: return
         if(!frameActive || activeFramebuffer == Int.MIN_VALUE) return
+        flushPendingIndirectDraws(cmd)
         applyViewport(cmd, activeTargetWidth, activeTargetHeight)
     }
 
@@ -442,6 +479,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
         val cmd = currentCommandBuffer ?: return
         if(!frameActive || activeFramebuffer == Int.MIN_VALUE) return
+        flushPendingIndirectDraws(cmd)
         applyScissor(cmd, activeTargetWidth, activeTargetHeight)
     }
 
@@ -450,6 +488,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
         val cmd = currentCommandBuffer ?: return
         if(!frameActive || activeFramebuffer == Int.MIN_VALUE) return
+        flushPendingIndirectDraws(cmd)
         applyScissor(cmd, activeTargetWidth, activeTargetHeight)
     }
 
@@ -1094,6 +1133,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
             else -> return
         }
         val indexBytes = indexCount * indexBytesPer
+        val vkIndexType = if(indexType == GL20.GL_UNSIGNED_INT) VK10.VK_INDEX_TYPE_UINT32 else VK10.VK_INDEX_TYPE_UINT16
         if(indices.remaining() < indexBytes){
             if(traceEnabled && currentFramebuffer == 26){
                 Log.info(
@@ -1147,54 +1187,6 @@ internal class Lwjgl3VulkanRuntime private constructor(
             }
         }
 
-        if(boundPipeline != pipeline){
-            VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline)
-            boundPipeline = pipeline
-            boundDescriptorSet = VK10.VK_NULL_HANDLE
-        }
-
-        bindVertexBufferHandles.position(0)
-        bindVertexBufferHandles.limit(1)
-        bindVertexBufferHandles.put(0, boundVertexBuffer)
-        bindVertexBufferOffsets.position(0)
-        bindVertexBufferOffsets.limit(1)
-        bindVertexBufferOffsets.put(0, vertexOffset.toLong())
-        VK10.vkCmdBindVertexBuffers(cmd, 0, bindVertexBufferHandles, bindVertexBufferOffsets)
-        val vkIndexType = if(indexType == GL20.GL_UNSIGNED_INT) VK10.VK_INDEX_TYPE_UINT32 else VK10.VK_INDEX_TYPE_UINT16
-        VK10.vkCmdBindIndexBuffer(cmd, boundIndexBuffer, indexOffset.toLong(), vkIndexType)
-
-        if(boundDescriptorSet != texture.descriptorSet){
-            bindDescriptorSets.position(0)
-            bindDescriptorSets.limit(1)
-            bindDescriptorSets.put(0, texture.descriptorSet)
-            VK10.vkCmdBindDescriptorSets(
-                cmd,
-                VK10.VK_PIPELINE_BIND_POINT_GRAPHICS,
-                spritePipelineLayout,
-                0,
-                bindDescriptorSets,
-                null
-            )
-            boundDescriptorSet = texture.descriptorSet
-        }
-
-        if(boundBlendColorR != blendColorR
-            || boundBlendColorG != blendColorG
-            || boundBlendColorB != blendColorB
-            || boundBlendColorA != blendColorA){
-            blendConstantsScratch.position(0)
-            blendConstantsScratch.limit(4)
-            blendConstantsScratch.put(0, blendColorR)
-            blendConstantsScratch.put(1, blendColorG)
-            blendConstantsScratch.put(2, blendColorB)
-            blendConstantsScratch.put(3, blendColorA)
-            VK10.vkCmdSetBlendConstants(cmd, blendConstantsScratch)
-            boundBlendColorR = blendColorR
-            boundBlendColorG = blendColorG
-            boundBlendColorB = blendColorB
-            boundBlendColorA = blendColorA
-        }
-
         for(i in 0 until 16){
             pushConstantsScratchFloats.put(i, projTrans[i])
         }
@@ -1239,29 +1231,26 @@ internal class Lwjgl3VulkanRuntime private constructor(
         pushConstantsScratchFloats.put(23, effectOffsetY)
         pushConstantsScratch.position(0)
         pushConstantsScratch.limit(spritePushConstantSizeBytes)
-        VK10.vkCmdPushConstants(
-            cmd,
-            spritePipelineLayout,
-            VK10.VK_SHADER_STAGE_VERTEX_BIT or VK10.VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            pushConstantsScratch
+        submitSpriteDraw(
+            commandBuffer = cmd,
+            pipeline = pipeline,
+            descriptorSet = texture.descriptorSet,
+            vertexBuffer = boundVertexBuffer,
+            vertexOffsetBytes = vertexOffset,
+            vertexStrideBytes = max(1, vertexLayout.stride),
+            indexBuffer = boundIndexBuffer,
+            indexOffsetBytes = indexOffset,
+            indexType = vkIndexType,
+            indexCount = indexCount,
+            baseVertex = baseVertex,
+            blendColorR = blendColorR,
+            blendColorG = blendColorG,
+            blendColorB = blendColorB,
+            blendColorA = blendColorA,
+            logFb26 = traceEnabled && currentFramebuffer == 26,
+            logIndexBytes = indexBytes,
+            logVertexBytes = vertexBytes
         )
-
-        VK10.vkCmdDrawIndexed(cmd, indexCount, 1, 0, baseVertex, 0)
-        if(traceEnabled && currentFramebuffer == 26){
-            Log.info(
-                "Vulkan fb26 draw issued idx=@ vertexBytes=@ indexBytes=@ variant=@ blend=@",
-                indexCount,
-                vertexBytes,
-                indexBytes,
-                shaderVariant,
-                blendEnabled
-            )
-        }
-
-        if(traceEnabled || perfTraceEnabled){
-            traceDrawCallsThisFrame++
-        }
 
         if(traceEnabled && (textureId == 83 || textureId == 24) && !traceDumpedGpuTextures.contains(textureId)){
             tracePendingTextureDumpIds.add(textureId)
@@ -1330,53 +1319,6 @@ internal class Lwjgl3VulkanRuntime private constructor(
             }
         }
 
-        if(boundPipeline != pipeline){
-            VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline)
-            boundPipeline = pipeline
-            boundDescriptorSet = VK10.VK_NULL_HANDLE
-        }
-
-        bindVertexBufferHandles.position(0)
-        bindVertexBufferHandles.limit(1)
-        bindVertexBufferHandles.put(0, boundVertexBuffer)
-        bindVertexBufferOffsets.position(0)
-        bindVertexBufferOffsets.limit(1)
-        bindVertexBufferOffsets.put(0, vertexOffset.toLong())
-        VK10.vkCmdBindVertexBuffers(cmd, 0, bindVertexBufferHandles, bindVertexBufferOffsets)
-        VK10.vkCmdBindIndexBuffer(cmd, spriteQuadIndexBuffer, 0L, VK10.VK_INDEX_TYPE_UINT16)
-
-        if(boundDescriptorSet != texture.descriptorSet){
-            bindDescriptorSets.position(0)
-            bindDescriptorSets.limit(1)
-            bindDescriptorSets.put(0, texture.descriptorSet)
-            VK10.vkCmdBindDescriptorSets(
-                cmd,
-                VK10.VK_PIPELINE_BIND_POINT_GRAPHICS,
-                spritePipelineLayout,
-                0,
-                bindDescriptorSets,
-                null
-            )
-            boundDescriptorSet = texture.descriptorSet
-        }
-
-        if(boundBlendColorR != blendColorR
-            || boundBlendColorG != blendColorG
-            || boundBlendColorB != blendColorB
-            || boundBlendColorA != blendColorA){
-            blendConstantsScratch.position(0)
-            blendConstantsScratch.limit(4)
-            blendConstantsScratch.put(0, blendColorR)
-            blendConstantsScratch.put(1, blendColorG)
-            blendConstantsScratch.put(2, blendColorB)
-            blendConstantsScratch.put(3, blendColorA)
-            VK10.vkCmdSetBlendConstants(cmd, blendConstantsScratch)
-            boundBlendColorR = blendColorR
-            boundBlendColorG = blendColorG
-            boundBlendColorB = blendColorB
-            boundBlendColorA = blendColorA
-        }
-
         for(i in 0 until 16){
             pushConstantsScratchFloats.put(i, projTrans[i])
         }
@@ -1392,22 +1334,516 @@ internal class Lwjgl3VulkanRuntime private constructor(
         pushConstantsScratchFloats.put(23, 0f)
         pushConstantsScratch.position(0)
         pushConstantsScratch.limit(spritePushConstantSizeBytes)
+        submitSpriteDraw(
+            commandBuffer = cmd,
+            pipeline = pipeline,
+            descriptorSet = texture.descriptorSet,
+            vertexBuffer = boundVertexBuffer,
+            vertexOffsetBytes = vertexOffset,
+            vertexStrideBytes = spriteVertexStride,
+            indexBuffer = spriteQuadIndexBuffer,
+            indexOffsetBytes = 0,
+            indexType = VK10.VK_INDEX_TYPE_UINT16,
+            indexCount = indexCount,
+            baseVertex = 0,
+            blendColorR = blendColorR,
+            blendColorG = blendColorG,
+            blendColorB = blendColorB,
+            blendColorA = blendColorA,
+            logFb26 = false,
+            logIndexBytes = indexCount * java.lang.Short.BYTES,
+            logVertexBytes = vertexBytes
+        )
+        if(perfTraceEnabled){
+            perfSpriteBatchFastPathDrawsThisFrame++
+            perfSpriteBatchFastPathSpritesThisFrame += spriteCount
+        }
+    }
+
+    private fun submitSpriteDraw(
+        commandBuffer: VkCommandBuffer,
+        pipeline: Long,
+        descriptorSet: Long,
+        vertexBuffer: Long,
+        vertexOffsetBytes: Int,
+        vertexStrideBytes: Int,
+        indexBuffer: Long,
+        indexOffsetBytes: Int,
+        indexType: Int,
+        indexCount: Int,
+        baseVertex: Int,
+        blendColorR: Float,
+        blendColorG: Float,
+        blendColorB: Float,
+        blendColorA: Float,
+        logFb26: Boolean,
+        logIndexBytes: Int,
+        logVertexBytes: Int
+    ){
+        if(indexCount <= 0) return
+        val indexBytesPer = when(indexType){
+            VK10.VK_INDEX_TYPE_UINT16 -> java.lang.Short.BYTES
+            VK10.VK_INDEX_TYPE_UINT32 -> java.lang.Integer.BYTES
+            else -> {
+                flushPendingIndirectDraws(commandBuffer)
+                issueImmediateSpriteDraw(
+                    commandBuffer,
+                    pipeline,
+                    descriptorSet,
+                    vertexBuffer,
+                    vertexOffsetBytes,
+                    indexBuffer,
+                    indexOffsetBytes,
+                    VK10.VK_INDEX_TYPE_UINT16,
+                    indexCount,
+                    baseVertex,
+                    blendColorR,
+                    blendColorG,
+                    blendColorB,
+                    blendColorA
+                )
+                if(traceEnabled || perfTraceEnabled) traceDrawCallsThisFrame++
+                if(perfTraceEnabled) perfIndirectFallbackDrawsThisFrame++
+                if(logFb26){
+                    Log.info(
+                        "Vulkan fb26 draw issued idx=@ vertexBytes=@ indexBytes=@ indirect=@",
+                        indexCount,
+                        logVertexBytes,
+                        logIndexBytes,
+                        false
+                    )
+                }
+                return
+            }
+        }
+
+        val stride = max(1, vertexStrideBytes)
+        val supportsIndirect = supportsMultiDrawIndirect
+            && spriteIndirectBuffer != VK10.VK_NULL_HANDLE
+            && spriteIndirectMapped != null
+            && (vertexOffsetBytes % stride == 0)
+            && (indexOffsetBytes % indexBytesPer == 0)
+
+        if(!supportsIndirect){
+            flushPendingIndirectDraws(commandBuffer)
+            issueImmediateSpriteDraw(
+                commandBuffer,
+                pipeline,
+                descriptorSet,
+                vertexBuffer,
+                vertexOffsetBytes,
+                indexBuffer,
+                indexOffsetBytes,
+                indexType,
+                indexCount,
+                baseVertex,
+                blendColorR,
+                blendColorG,
+                blendColorB,
+                blendColorA
+            )
+            if(traceEnabled || perfTraceEnabled) traceDrawCallsThisFrame++
+            if(perfTraceEnabled) perfIndirectFallbackDrawsThisFrame++
+            if(logFb26){
+                Log.info(
+                    "Vulkan fb26 draw issued idx=@ vertexBytes=@ indexBytes=@ indirect=@",
+                    indexCount,
+                    logVertexBytes,
+                    logIndexBytes,
+                    false
+                )
+            }
+            return
+        }
+
+        val firstIndex = indexOffsetBytes / indexBytesPer
+        val vertexOffset = baseVertex + (vertexOffsetBytes / stride)
+
+        if(pendingIndirectActive
+            && !pendingIndirectMatches(
+                pipeline = pipeline,
+                descriptorSet = descriptorSet,
+                vertexBuffer = vertexBuffer,
+                indexBuffer = indexBuffer,
+                indexType = indexType,
+                blendColorR = blendColorR,
+                blendColorG = blendColorG,
+                blendColorB = blendColorB,
+                blendColorA = blendColorA
+            )){
+            flushPendingIndirectDraws(commandBuffer)
+        }
+
+        if(!pendingIndirectActive){
+            if(!ensureIndirectCommandCapacity(1)){
+                flushPendingIndirectDraws(commandBuffer)
+                issueImmediateSpriteDraw(
+                    commandBuffer,
+                    pipeline,
+                    descriptorSet,
+                    vertexBuffer,
+                    vertexOffsetBytes,
+                    indexBuffer,
+                    indexOffsetBytes,
+                    indexType,
+                    indexCount,
+                    baseVertex,
+                    blendColorR,
+                    blendColorG,
+                    blendColorB,
+                    blendColorA
+                )
+                if(traceEnabled || perfTraceEnabled) traceDrawCallsThisFrame++
+                if(perfTraceEnabled) perfIndirectFallbackDrawsThisFrame++
+                if(logFb26){
+                    Log.info(
+                        "Vulkan fb26 draw issued idx=@ vertexBytes=@ indexBytes=@ indirect=@",
+                        indexCount,
+                        logVertexBytes,
+                        logIndexBytes,
+                        false
+                    )
+                }
+                return
+            }
+            pendingIndirectActive = true
+            pendingIndirectPipeline = pipeline
+            pendingIndirectDescriptorSet = descriptorSet
+            pendingIndirectVertexBuffer = vertexBuffer
+            pendingIndirectIndexBuffer = indexBuffer
+            pendingIndirectIndexType = indexType
+            pendingIndirectBlendColorR = blendColorR
+            pendingIndirectBlendColorG = blendColorG
+            pendingIndirectBlendColorB = blendColorB
+            pendingIndirectBlendColorA = blendColorA
+            pendingIndirectCommandOffsetBytes = spriteIndirectCursor
+            pendingIndirectCommandCount = 0
+            copyCurrentPushConstantsToPending()
+        }else if(!matchesCurrentPushConstantsToPending()){
+            flushPendingIndirectDraws(commandBuffer)
+            if(!ensureIndirectCommandCapacity(1)){
+                issueImmediateSpriteDraw(
+                    commandBuffer,
+                    pipeline,
+                    descriptorSet,
+                    vertexBuffer,
+                    vertexOffsetBytes,
+                    indexBuffer,
+                    indexOffsetBytes,
+                    indexType,
+                    indexCount,
+                    baseVertex,
+                    blendColorR,
+                    blendColorG,
+                    blendColorB,
+                    blendColorA
+                )
+                if(traceEnabled || perfTraceEnabled) traceDrawCallsThisFrame++
+                if(perfTraceEnabled) perfIndirectFallbackDrawsThisFrame++
+                if(logFb26){
+                    Log.info(
+                        "Vulkan fb26 draw issued idx=@ vertexBytes=@ indexBytes=@ indirect=@",
+                        indexCount,
+                        logVertexBytes,
+                        logIndexBytes,
+                        false
+                    )
+                }
+                return
+            }
+            pendingIndirectActive = true
+            pendingIndirectPipeline = pipeline
+            pendingIndirectDescriptorSet = descriptorSet
+            pendingIndirectVertexBuffer = vertexBuffer
+            pendingIndirectIndexBuffer = indexBuffer
+            pendingIndirectIndexType = indexType
+            pendingIndirectBlendColorR = blendColorR
+            pendingIndirectBlendColorG = blendColorG
+            pendingIndirectBlendColorB = blendColorB
+            pendingIndirectBlendColorA = blendColorA
+            pendingIndirectCommandOffsetBytes = spriteIndirectCursor
+            pendingIndirectCommandCount = 0
+            copyCurrentPushConstantsToPending()
+        }
+
+        if(!appendIndirectDrawCommand(indexCount, firstIndex, vertexOffset)){
+            flushPendingIndirectDraws(commandBuffer)
+            issueImmediateSpriteDraw(
+                commandBuffer,
+                pipeline,
+                descriptorSet,
+                vertexBuffer,
+                vertexOffsetBytes,
+                indexBuffer,
+                indexOffsetBytes,
+                indexType,
+                indexCount,
+                baseVertex,
+                blendColorR,
+                blendColorG,
+                blendColorB,
+                blendColorA
+            )
+            if(traceEnabled || perfTraceEnabled) traceDrawCallsThisFrame++
+            if(perfTraceEnabled) perfIndirectFallbackDrawsThisFrame++
+            if(logFb26){
+                Log.info(
+                    "Vulkan fb26 draw issued idx=@ vertexBytes=@ indexBytes=@ indirect=@",
+                    indexCount,
+                    logVertexBytes,
+                    logIndexBytes,
+                    false
+                )
+            }
+            return
+        }
+
+        if(traceEnabled || perfTraceEnabled){
+            traceDrawCallsThisFrame++
+        }
+        if(logFb26){
+            Log.info(
+                "Vulkan fb26 draw issued idx=@ vertexBytes=@ indexBytes=@ indirect=@",
+                indexCount,
+                logVertexBytes,
+                logIndexBytes,
+                true
+            )
+        }
+    }
+
+    private fun issueImmediateSpriteDraw(
+        commandBuffer: VkCommandBuffer,
+        pipeline: Long,
+        descriptorSet: Long,
+        vertexBuffer: Long,
+        vertexOffsetBytes: Int,
+        indexBuffer: Long,
+        indexOffsetBytes: Int,
+        indexType: Int,
+        indexCount: Int,
+        baseVertex: Int,
+        blendColorR: Float,
+        blendColorG: Float,
+        blendColorB: Float,
+        blendColorA: Float
+    ){
+        if(boundPipeline != pipeline){
+            VK10.vkCmdBindPipeline(commandBuffer, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline)
+            boundPipeline = pipeline
+            boundDescriptorSet = VK10.VK_NULL_HANDLE
+        }
+
+        bindVertexBufferHandles.position(0)
+        bindVertexBufferHandles.limit(1)
+        bindVertexBufferHandles.put(0, vertexBuffer)
+        bindVertexBufferOffsets.position(0)
+        bindVertexBufferOffsets.limit(1)
+        bindVertexBufferOffsets.put(0, vertexOffsetBytes.toLong())
+        VK10.vkCmdBindVertexBuffers(commandBuffer, 0, bindVertexBufferHandles, bindVertexBufferOffsets)
+        VK10.vkCmdBindIndexBuffer(commandBuffer, indexBuffer, indexOffsetBytes.toLong(), indexType)
+
+        if(boundDescriptorSet != descriptorSet){
+            bindDescriptorSets.position(0)
+            bindDescriptorSets.limit(1)
+            bindDescriptorSets.put(0, descriptorSet)
+            VK10.vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK10.VK_PIPELINE_BIND_POINT_GRAPHICS,
+                spritePipelineLayout,
+                0,
+                bindDescriptorSets,
+                null
+            )
+            boundDescriptorSet = descriptorSet
+        }
+
+        if(boundBlendColorR != blendColorR
+            || boundBlendColorG != blendColorG
+            || boundBlendColorB != blendColorB
+            || boundBlendColorA != blendColorA){
+            blendConstantsScratch.position(0)
+            blendConstantsScratch.limit(4)
+            blendConstantsScratch.put(0, blendColorR)
+            blendConstantsScratch.put(1, blendColorG)
+            blendConstantsScratch.put(2, blendColorB)
+            blendConstantsScratch.put(3, blendColorA)
+            VK10.vkCmdSetBlendConstants(commandBuffer, blendConstantsScratch)
+            boundBlendColorR = blendColorR
+            boundBlendColorG = blendColorG
+            boundBlendColorB = blendColorB
+            boundBlendColorA = blendColorA
+        }
         VK10.vkCmdPushConstants(
-            cmd,
+            commandBuffer,
+            spritePipelineLayout,
+            VK10.VK_SHADER_STAGE_VERTEX_BIT or VK10.VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            pushConstantsScratch
+        )
+        VK10.vkCmdDrawIndexed(commandBuffer, indexCount, 1, 0, baseVertex, 0)
+    }
+
+    private fun pendingIndirectMatches(
+        pipeline: Long,
+        descriptorSet: Long,
+        vertexBuffer: Long,
+        indexBuffer: Long,
+        indexType: Int,
+        blendColorR: Float,
+        blendColorG: Float,
+        blendColorB: Float,
+        blendColorA: Float
+    ): Boolean {
+        return pendingIndirectPipeline == pipeline
+            && pendingIndirectDescriptorSet == descriptorSet
+            && pendingIndirectVertexBuffer == vertexBuffer
+            && pendingIndirectIndexBuffer == indexBuffer
+            && pendingIndirectIndexType == indexType
+            && pendingIndirectBlendColorR == blendColorR
+            && pendingIndirectBlendColorG == blendColorG
+            && pendingIndirectBlendColorB == blendColorB
+            && pendingIndirectBlendColorA == blendColorA
+    }
+
+    private fun ensureIndirectCommandCapacity(additionalCommands: Int): Boolean {
+        if(additionalCommands <= 0) return true
+        val requiredBytes = additionalCommands * spriteIndirectCommandSizeBytes
+        if(requiredBytes <= 0) return false
+        return spriteIndirectMapped != null
+            && spriteIndirectBuffer != VK10.VK_NULL_HANDLE
+            && spriteIndirectCursor + requiredBytes <= spriteIndirectCapacityBytes
+    }
+
+    private fun appendIndirectDrawCommand(indexCount: Int, firstIndex: Int, vertexOffset: Int): Boolean {
+        if(!ensureIndirectCommandCapacity(1)) return false
+        val mapped = spriteIndirectMapped ?: return false
+        val writeOffset = spriteIndirectCursor
+        mapped.putInt(writeOffset, indexCount)
+        mapped.putInt(writeOffset + 4, 1)
+        mapped.putInt(writeOffset + 8, firstIndex)
+        mapped.putInt(writeOffset + 12, vertexOffset)
+        mapped.putInt(writeOffset + 16, 0)
+        spriteIndirectCursor += spriteIndirectCommandSizeBytes
+        pendingIndirectCommandCount++
+        return true
+    }
+
+    private fun copyCurrentPushConstantsToPending() {
+        for(i in 0 until spritePushConstantFloatCount){
+            pendingPushConstants[i] = pushConstantsScratchFloats.get(i)
+        }
+        pendingPushConstantsValid = true
+    }
+
+    private fun matchesCurrentPushConstantsToPending(): Boolean {
+        if(!pendingPushConstantsValid) return false
+        for(i in 0 until spritePushConstantFloatCount){
+            if(pendingPushConstants[i] != pushConstantsScratchFloats.get(i)) return false
+        }
+        return true
+    }
+
+    private fun resetPendingIndirectBatch() {
+        pendingIndirectActive = false
+        pendingIndirectPipeline = VK10.VK_NULL_HANDLE
+        pendingIndirectDescriptorSet = VK10.VK_NULL_HANDLE
+        pendingIndirectVertexBuffer = VK10.VK_NULL_HANDLE
+        pendingIndirectIndexBuffer = VK10.VK_NULL_HANDLE
+        pendingIndirectIndexType = VK10.VK_INDEX_TYPE_UINT16
+        pendingIndirectBlendColorR = 0f
+        pendingIndirectBlendColorG = 0f
+        pendingIndirectBlendColorB = 0f
+        pendingIndirectBlendColorA = 0f
+        pendingIndirectCommandOffsetBytes = 0
+        pendingIndirectCommandCount = 0
+        pendingPushConstantsValid = false
+    }
+
+    private fun flushPendingIndirectDraws(commandBuffer: VkCommandBuffer){
+        if(!pendingIndirectActive || pendingIndirectCommandCount <= 0){
+            resetPendingIndirectBatch()
+            return
+        }
+        if(spriteIndirectBuffer == VK10.VK_NULL_HANDLE){
+            resetPendingIndirectBatch()
+            return
+        }
+
+        if(boundPipeline != pendingIndirectPipeline){
+            VK10.vkCmdBindPipeline(commandBuffer, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pendingIndirectPipeline)
+            boundPipeline = pendingIndirectPipeline
+            boundDescriptorSet = VK10.VK_NULL_HANDLE
+        }
+
+        bindVertexBufferHandles.position(0)
+        bindVertexBufferHandles.limit(1)
+        bindVertexBufferHandles.put(0, pendingIndirectVertexBuffer)
+        bindVertexBufferOffsets.position(0)
+        bindVertexBufferOffsets.limit(1)
+        bindVertexBufferOffsets.put(0, 0L)
+        VK10.vkCmdBindVertexBuffers(commandBuffer, 0, bindVertexBufferHandles, bindVertexBufferOffsets)
+        VK10.vkCmdBindIndexBuffer(commandBuffer, pendingIndirectIndexBuffer, 0L, pendingIndirectIndexType)
+
+        if(boundDescriptorSet != pendingIndirectDescriptorSet){
+            bindDescriptorSets.position(0)
+            bindDescriptorSets.limit(1)
+            bindDescriptorSets.put(0, pendingIndirectDescriptorSet)
+            VK10.vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK10.VK_PIPELINE_BIND_POINT_GRAPHICS,
+                spritePipelineLayout,
+                0,
+                bindDescriptorSets,
+                null
+            )
+            boundDescriptorSet = pendingIndirectDescriptorSet
+        }
+
+        blendConstantsScratch.position(0)
+        blendConstantsScratch.limit(4)
+        blendConstantsScratch.put(0, pendingIndirectBlendColorR)
+        blendConstantsScratch.put(1, pendingIndirectBlendColorG)
+        blendConstantsScratch.put(2, pendingIndirectBlendColorB)
+        blendConstantsScratch.put(3, pendingIndirectBlendColorA)
+        if(boundBlendColorR != pendingIndirectBlendColorR
+            || boundBlendColorG != pendingIndirectBlendColorG
+            || boundBlendColorB != pendingIndirectBlendColorB
+            || boundBlendColorA != pendingIndirectBlendColorA){
+            VK10.vkCmdSetBlendConstants(commandBuffer, blendConstantsScratch)
+            boundBlendColorR = pendingIndirectBlendColorR
+            boundBlendColorG = pendingIndirectBlendColorG
+            boundBlendColorB = pendingIndirectBlendColorB
+            boundBlendColorA = pendingIndirectBlendColorA
+        }
+
+        for(i in 0 until spritePushConstantFloatCount){
+            pushConstantsScratchFloats.put(i, pendingPushConstants[i])
+        }
+        pushConstantsScratch.position(0)
+        pushConstantsScratch.limit(spritePushConstantSizeBytes)
+        VK10.vkCmdPushConstants(
+            commandBuffer,
             spritePipelineLayout,
             VK10.VK_SHADER_STAGE_VERTEX_BIT or VK10.VK_SHADER_STAGE_FRAGMENT_BIT,
             0,
             pushConstantsScratch
         )
 
-        VK10.vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0)
-        if(traceEnabled || perfTraceEnabled){
-            traceDrawCallsThisFrame++
-        }
+        VK10.vkCmdDrawIndexedIndirect(
+            commandBuffer,
+            spriteIndirectBuffer,
+            pendingIndirectCommandOffsetBytes.toLong(),
+            pendingIndirectCommandCount,
+            spriteIndirectCommandSizeBytes
+        )
+
         if(perfTraceEnabled){
-            perfSpriteBatchFastPathDrawsThisFrame++
-            perfSpriteBatchFastPathSpritesThisFrame += spriteCount
+            perfIndirectCallsThisFrame++
+            perfIndirectDrawsThisFrame += pendingIndirectCommandCount
         }
+
+        resetPendingIndirectBatch()
     }
 
     private fun getSpritePipeline(
@@ -1726,6 +2162,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
     private fun endActiveRenderPass(commandBuffer: VkCommandBuffer){
         if(activeFramebuffer == Int.MIN_VALUE) return
+        flushPendingIndirectDraws(commandBuffer)
         VK10.vkCmdEndRenderPass(commandBuffer)
         activeFramebuffer = Int.MIN_VALUE
         activeTargetWidth = 0
@@ -1887,6 +2324,9 @@ internal class Lwjgl3VulkanRuntime private constructor(
             perfSpriteStreamDropIndexBytesThisFrame = 0L
             perfSpriteBatchFastPathDrawsThisFrame = 0
             perfSpriteBatchFastPathSpritesThisFrame = 0
+            perfIndirectCallsThisFrame = 0
+            perfIndirectDrawsThisFrame = 0
+            perfIndirectFallbackDrawsThisFrame = 0
             perfHostBufferPoolHitsThisFrame = 0
             perfHostBufferPoolMissesThisFrame = 0
             perfHostBufferPoolRecycleThisFrame = 0
@@ -1931,6 +2371,8 @@ internal class Lwjgl3VulkanRuntime private constructor(
 
             spriteVertexCursor = 0
             spriteIndexCursor = 0
+            spriteIndirectCursor = 0
+            resetPendingIndirectBatch()
             traceDrawCallsThisFrame = 0
             activeFramebuffer = Int.MIN_VALUE
             activeTargetWidth = 0
@@ -1945,6 +2387,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         val commandBuffer = currentCommandBuffer ?: return
 
         MemoryStack.stackPush().use { stack ->
+            flushPendingIndirectDraws(commandBuffer)
             endActiveRenderPass(commandBuffer)
             check(VK10.vkEndCommandBuffer(commandBuffer), "Failed ending Vulkan command buffer.")
 
@@ -1998,7 +2441,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         }
         if(perfTraceEnabled && traceFrameCounter % 120L == 0L){
             Log.info(
-                "Vulkan perf frame @ drawCalls=@ waitIdle=@ oneShotCmd=@ inlineTex=@ staging(recreate=@ allocBytes=@ cap=@) streamSpill(draws=@ vtxBytes=@ idxBytes=@) streamDrop(draws=@ vtxBytes=@ idxBytes=@) batchFast(draws=@ sprites=@) hostPool(hit=@ miss=@ recycle=@ drop=@ buckets=@) defaultFxFallback=@",
+                "Vulkan perf frame @ drawCalls=@ waitIdle=@ oneShotCmd=@ inlineTex=@ staging(recreate=@ allocBytes=@ cap=@) streamSpill(draws=@ vtxBytes=@ idxBytes=@) streamDrop(draws=@ vtxBytes=@ idxBytes=@) batchFast(draws=@ sprites=@) indirect(calls=@ draws=@ fallback=@ enabled=@) hostPool(hit=@ miss=@ recycle=@ drop=@ buckets=@) defaultFxFallback=@",
                 traceFrameCounter,
                 traceDrawCallsThisFrame,
                 perfWaitIdleCallsThisFrame,
@@ -2015,6 +2458,10 @@ internal class Lwjgl3VulkanRuntime private constructor(
                 perfSpriteStreamDropIndexBytesThisFrame,
                 perfSpriteBatchFastPathDrawsThisFrame,
                 perfSpriteBatchFastPathSpritesThisFrame,
+                perfIndirectCallsThisFrame,
+                perfIndirectDrawsThisFrame,
+                perfIndirectFallbackDrawsThisFrame,
+                supportsMultiDrawIndirect,
                 perfHostBufferPoolHitsThisFrame,
                 perfHostBufferPoolMissesThisFrame,
                 perfHostBufferPoolRecycleThisFrame,
@@ -2474,10 +2921,22 @@ internal class Lwjgl3VulkanRuntime private constructor(
         spriteIndexMappedPtr = indexBuffer.mappedPtr
         spriteIndexMapped = indexBuffer.mapped
 
+        val indirectBuffer = createHostVisibleBuffer(
+            spriteIndirectBufferSize,
+            VK10.VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+        )
+        spriteIndirectBuffer = indirectBuffer.buffer
+        spriteIndirectAllocation = indirectBuffer.allocation
+        spriteIndirectMapped = indirectBuffer.mapped
+        spriteIndirectCapacityBytes = indirectBuffer.capacity
+        spriteIndirectCursor = 0
+        resetPendingIndirectBatch()
+
         ensureSpriteQuadIndexCapacity(initialSpriteQuadBatchSprites)
     }
 
     private fun destroySpriteBuffers(){
+        resetPendingIndirectBatch()
         spriteVertexMappedPtr = 0L
         spriteVertexMapped = null
         if(spriteVertexBuffer != VK10.VK_NULL_HANDLE && spriteVertexBufferAllocation != VK10.VK_NULL_HANDLE){
@@ -2493,6 +2952,16 @@ internal class Lwjgl3VulkanRuntime private constructor(
         }
         spriteIndexBuffer = VK10.VK_NULL_HANDLE
         spriteIndexBufferAllocation = VK10.VK_NULL_HANDLE
+
+        spriteIndirectMapped = null
+        if(spriteIndirectBuffer != VK10.VK_NULL_HANDLE && spriteIndirectAllocation != VK10.VK_NULL_HANDLE){
+            Vma.vmaDestroyBuffer(allocator, spriteIndirectBuffer, spriteIndirectAllocation)
+        }
+        spriteIndirectBuffer = VK10.VK_NULL_HANDLE
+        spriteIndirectAllocation = VK10.VK_NULL_HANDLE
+        spriteIndirectCapacityBytes = 0
+        spriteIndirectCursor = 0
+
         spriteQuadIndexMapped = null
         if(spriteQuadIndexBuffer != VK10.VK_NULL_HANDLE && spriteQuadIndexAllocation != VK10.VK_NULL_HANDLE){
             Vma.vmaDestroyBuffer(allocator, spriteQuadIndexBuffer, spriteQuadIndexAllocation)
@@ -3583,9 +4052,12 @@ internal class Lwjgl3VulkanRuntime private constructor(
     companion object{
         private const val maxFramesInFlight = 2
         private const val spriteVertexStride = 24
+        private const val spritePushConstantFloatCount = 24
         private const val spritePushConstantSizeBytes = 24 * 4
         private const val spriteVertexBufferSize = 64 * 1024 * 1024
         private const val spriteIndexBufferSize = 32 * 1024 * 1024
+        private const val spriteIndirectCommandSizeBytes = 5 * 4
+        private const val spriteIndirectBufferSize = 8 * 1024 * 1024
         private const val initialSpriteQuadBatchSprites = 2048
         private const val maxSpriteQuadBatchSprites = 8191
         private const val spillVertexPageSizeBytes = 4 * 1024 * 1024
@@ -3883,7 +4355,13 @@ void main(){
                     }
 
                     val deviceExtensions = stack.pointers(stack.UTF8(KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME))
+                    val availableFeatures = VkPhysicalDeviceFeatures.calloc(stack)
+                    VK10.vkGetPhysicalDeviceFeatures(physicalDevice, availableFeatures)
+                    val multiDrawIndirectSupported = availableFeatures.multiDrawIndirect()
                     val deviceFeatures = VkPhysicalDeviceFeatures.calloc(stack)
+                    if(multiDrawIndirectSupported){
+                        deviceFeatures.multiDrawIndirect(true)
+                    }
                     val deviceInfo = VkDeviceCreateInfo.calloc(stack)
                     deviceInfo.sType(VK10.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
                     deviceInfo.pQueueCreateInfos(queueInfos)
@@ -3911,7 +4389,8 @@ void main(){
                         presentQueueFamily = queueFamilies.present,
                         graphicsQueue = graphicsQueue,
                         presentQueue = presentQueue,
-                        allocator = allocator
+                        allocator = allocator,
+                        supportsMultiDrawIndirect = multiDrawIndirectSupported
                     )
                 }
             }catch(e: Throwable){
