@@ -147,6 +147,8 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private var perfSpriteStreamDropsThisFrame = 0
     private var perfSpriteStreamDropVertexBytesThisFrame = 0L
     private var perfSpriteStreamDropIndexBytesThisFrame = 0L
+    private var perfSpriteBatchFastPathDrawsThisFrame = 0
+    private var perfSpriteBatchFastPathSpritesThisFrame = 0
     private var perfHostBufferPoolHitsThisFrame = 0
     private var perfHostBufferPoolMissesThisFrame = 0
     private var perfHostBufferPoolRecycleThisFrame = 0
@@ -184,6 +186,10 @@ internal class Lwjgl3VulkanRuntime private constructor(
     private var spriteIndexMappedPtr = 0L
     private var spriteIndexMapped: ByteBuffer? = null
     private var spriteIndexCursor = 0
+    private var spriteQuadIndexBuffer = VK10.VK_NULL_HANDLE
+    private var spriteQuadIndexAllocation = VK10.VK_NULL_HANDLE
+    private var spriteQuadIndexMapped: ByteBuffer? = null
+    private var spriteQuadIndexCapacitySprites = 0
     private val transientSpriteBuffersByFrame = Array(maxFramesInFlight){ ArrayList<HostVisibleBuffer>() }
     private val pooledHostVisibleBuffers = HashMap<Long, ArrayDeque<HostVisibleBuffer>>()
     private var spillVertexPage: HostVisibleBuffer? = null
@@ -1262,6 +1268,148 @@ internal class Lwjgl3VulkanRuntime private constructor(
         }
     }
 
+    fun drawSpriteQuadBatch(
+        vertices: ByteBuffer,
+        vertexCount: Int,
+        textureId: Int,
+        projTrans: FloatArray,
+        blendEnabled: Boolean,
+        blendSrcColor: Int,
+        blendDstColor: Int,
+        blendSrcAlpha: Int,
+        blendDstAlpha: Int,
+        blendEqColor: Int,
+        blendEqAlpha: Int,
+        blendColorR: Float,
+        blendColorG: Float,
+        blendColorB: Float,
+        blendColorA: Float
+    ){
+        if(!frameActive || vertexCount <= 0 || (vertexCount and 3) != 0) return
+        val spriteCount = vertexCount / 4
+        if(spriteCount <= 0 || spriteCount > maxSpriteQuadBatchSprites) return
+        if(!ensureRenderTargetBound()) return
+        val cmd = currentCommandBuffer ?: return
+        val texture = spriteTextures[textureId] ?: return
+        if(!ensureSpriteQuadIndexCapacity(spriteCount)) return
+
+        val pipeline = getSpritePipeline(
+            activeFramebuffer == 0,
+            SpriteShaderVariant.Default,
+            defaultSpriteVertexLayout,
+            blendEnabled,
+            blendSrcColor,
+            blendDstColor,
+            blendSrcAlpha,
+            blendDstAlpha,
+            blendEqColor,
+            blendEqAlpha
+        )
+        if(pipeline == VK10.VK_NULL_HANDLE) return
+
+        val vertexBytes = vertices.remaining()
+        val indexCount = spriteCount * 6
+        val usePersistentStream = spriteVertexMapped != null && spriteVertexCursor + vertexBytes <= spriteVertexBufferSize
+
+        val vertexOffset: Int
+        val boundVertexBuffer: Long
+        if(usePersistentStream){
+            vertexOffset = spriteVertexCursor
+            copyToMappedBuffer(vertices, vertexBytes, spriteVertexMapped!!, spriteVertexMappedPtr, vertexOffset)
+            spriteVertexCursor += align4(vertexBytes)
+            boundVertexBuffer = spriteVertexBuffer
+        }else{
+            val vertexSlice = allocateSpillSlice(vertexBytes, VK10.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, spillVertexPageSizeBytes, true)
+                ?: return
+            copyToMappedBuffer(vertices, vertexBytes, vertexSlice.page.mapped, vertexSlice.page.mappedPtr, vertexSlice.offset)
+            vertexOffset = vertexSlice.offset
+            boundVertexBuffer = vertexSlice.page.buffer
+            if(perfTraceEnabled){
+                perfSpriteStreamSpillsThisFrame++
+                perfSpriteStreamSpillVertexBytesThisFrame += vertexBytes.toLong()
+            }
+        }
+
+        if(boundPipeline != pipeline){
+            VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline)
+            boundPipeline = pipeline
+            boundDescriptorSet = VK10.VK_NULL_HANDLE
+        }
+
+        bindVertexBufferHandles.position(0)
+        bindVertexBufferHandles.limit(1)
+        bindVertexBufferHandles.put(0, boundVertexBuffer)
+        bindVertexBufferOffsets.position(0)
+        bindVertexBufferOffsets.limit(1)
+        bindVertexBufferOffsets.put(0, vertexOffset.toLong())
+        VK10.vkCmdBindVertexBuffers(cmd, 0, bindVertexBufferHandles, bindVertexBufferOffsets)
+        VK10.vkCmdBindIndexBuffer(cmd, spriteQuadIndexBuffer, 0L, VK10.VK_INDEX_TYPE_UINT16)
+
+        if(boundDescriptorSet != texture.descriptorSet){
+            bindDescriptorSets.position(0)
+            bindDescriptorSets.limit(1)
+            bindDescriptorSets.put(0, texture.descriptorSet)
+            VK10.vkCmdBindDescriptorSets(
+                cmd,
+                VK10.VK_PIPELINE_BIND_POINT_GRAPHICS,
+                spritePipelineLayout,
+                0,
+                bindDescriptorSets,
+                null
+            )
+            boundDescriptorSet = texture.descriptorSet
+        }
+
+        if(boundBlendColorR != blendColorR
+            || boundBlendColorG != blendColorG
+            || boundBlendColorB != blendColorB
+            || boundBlendColorA != blendColorA){
+            blendConstantsScratch.position(0)
+            blendConstantsScratch.limit(4)
+            blendConstantsScratch.put(0, blendColorR)
+            blendConstantsScratch.put(1, blendColorG)
+            blendConstantsScratch.put(2, blendColorB)
+            blendConstantsScratch.put(3, blendColorA)
+            VK10.vkCmdSetBlendConstants(cmd, blendConstantsScratch)
+            boundBlendColorR = blendColorR
+            boundBlendColorG = blendColorG
+            boundBlendColorB = blendColorB
+            boundBlendColorA = blendColorA
+        }
+
+        for(i in 0 until 16){
+            pushConstantsScratchFloats.put(i, projTrans[i])
+        }
+        val texWidth = texture.width.toFloat().coerceAtLeast(1f)
+        val texHeight = texture.height.toFloat().coerceAtLeast(1f)
+        pushConstantsScratchFloats.put(16, texWidth)
+        pushConstantsScratchFloats.put(17, texHeight)
+        pushConstantsScratchFloats.put(18, 1f / texWidth)
+        pushConstantsScratchFloats.put(19, 1f / texHeight)
+        pushConstantsScratchFloats.put(20, 0f)
+        pushConstantsScratchFloats.put(21, 1f)
+        pushConstantsScratchFloats.put(22, 0f)
+        pushConstantsScratchFloats.put(23, 0f)
+        pushConstantsScratch.position(0)
+        pushConstantsScratch.limit(spritePushConstantSizeBytes)
+        VK10.vkCmdPushConstants(
+            cmd,
+            spritePipelineLayout,
+            VK10.VK_SHADER_STAGE_VERTEX_BIT or VK10.VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            pushConstantsScratch
+        )
+
+        VK10.vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0)
+        if(traceEnabled || perfTraceEnabled){
+            traceDrawCallsThisFrame++
+        }
+        if(perfTraceEnabled){
+            perfSpriteBatchFastPathDrawsThisFrame++
+            perfSpriteBatchFastPathSpritesThisFrame += spriteCount
+        }
+    }
+
     private fun getSpritePipeline(
         swapchainTarget: Boolean,
         shaderVariant: SpriteShaderVariant,
@@ -1737,6 +1885,8 @@ internal class Lwjgl3VulkanRuntime private constructor(
             perfSpriteStreamDropsThisFrame = 0
             perfSpriteStreamDropVertexBytesThisFrame = 0L
             perfSpriteStreamDropIndexBytesThisFrame = 0L
+            perfSpriteBatchFastPathDrawsThisFrame = 0
+            perfSpriteBatchFastPathSpritesThisFrame = 0
             perfHostBufferPoolHitsThisFrame = 0
             perfHostBufferPoolMissesThisFrame = 0
             perfHostBufferPoolRecycleThisFrame = 0
@@ -1848,7 +1998,7 @@ internal class Lwjgl3VulkanRuntime private constructor(
         }
         if(perfTraceEnabled && traceFrameCounter % 120L == 0L){
             Log.info(
-                "Vulkan perf frame @ drawCalls=@ waitIdle=@ oneShotCmd=@ inlineTex=@ staging(recreate=@ allocBytes=@ cap=@) streamSpill(draws=@ vtxBytes=@ idxBytes=@) streamDrop(draws=@ vtxBytes=@ idxBytes=@) hostPool(hit=@ miss=@ recycle=@ drop=@ buckets=@) defaultFxFallback=@",
+                "Vulkan perf frame @ drawCalls=@ waitIdle=@ oneShotCmd=@ inlineTex=@ staging(recreate=@ allocBytes=@ cap=@) streamSpill(draws=@ vtxBytes=@ idxBytes=@) streamDrop(draws=@ vtxBytes=@ idxBytes=@) batchFast(draws=@ sprites=@) hostPool(hit=@ miss=@ recycle=@ drop=@ buckets=@) defaultFxFallback=@",
                 traceFrameCounter,
                 traceDrawCallsThisFrame,
                 perfWaitIdleCallsThisFrame,
@@ -1863,6 +2013,8 @@ internal class Lwjgl3VulkanRuntime private constructor(
                 perfSpriteStreamDropsThisFrame,
                 perfSpriteStreamDropVertexBytesThisFrame,
                 perfSpriteStreamDropIndexBytesThisFrame,
+                perfSpriteBatchFastPathDrawsThisFrame,
+                perfSpriteBatchFastPathSpritesThisFrame,
                 perfHostBufferPoolHitsThisFrame,
                 perfHostBufferPoolMissesThisFrame,
                 perfHostBufferPoolRecycleThisFrame,
@@ -2052,6 +2204,54 @@ internal class Lwjgl3VulkanRuntime private constructor(
             )
         }catch(_: Throwable){
             return null
+        }
+    }
+
+    private fun ensureSpriteQuadIndexCapacity(requiredSprites: Int): Boolean{
+        if(requiredSprites <= 0) return false
+        if(requiredSprites <= spriteQuadIndexCapacitySprites
+            && spriteQuadIndexBuffer != VK10.VK_NULL_HANDLE
+            && spriteQuadIndexAllocation != VK10.VK_NULL_HANDLE){
+            return true
+        }
+
+        val newCapacity = nextPow2(max(requiredSprites, 256)).coerceAtMost(maxSpriteQuadBatchSprites)
+        if(newCapacity < requiredSprites) return false
+
+        if(spriteQuadIndexBuffer != VK10.VK_NULL_HANDLE && spriteQuadIndexAllocation != VK10.VK_NULL_HANDLE){
+            Vma.vmaDestroyBuffer(allocator, spriteQuadIndexBuffer, spriteQuadIndexAllocation)
+            spriteQuadIndexBuffer = VK10.VK_NULL_HANDLE
+            spriteQuadIndexAllocation = VK10.VK_NULL_HANDLE
+            spriteQuadIndexMapped = null
+            spriteQuadIndexCapacitySprites = 0
+        }
+
+        val indexCount = newCapacity * 6
+        val indexBytes = indexCount * java.lang.Short.BYTES
+        return try{
+            val quadIndex = createHostVisibleBuffer(indexBytes, VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
+            val mapped = quadIndex.mapped
+            mapped.clear()
+            mapped.limit(indexBytes)
+            var base = 0
+            for(i in 0 until newCapacity){
+                mapped.putShort(base.toShort())
+                mapped.putShort((base + 1).toShort())
+                mapped.putShort((base + 2).toShort())
+                mapped.putShort((base + 2).toShort())
+                mapped.putShort((base + 3).toShort())
+                mapped.putShort(base.toShort())
+                base += 4
+            }
+            mapped.position(0)
+            mapped.limit(indexBytes)
+            spriteQuadIndexBuffer = quadIndex.buffer
+            spriteQuadIndexAllocation = quadIndex.allocation
+            spriteQuadIndexMapped = mapped
+            spriteQuadIndexCapacitySprites = newCapacity
+            true
+        }catch(_: Throwable){
+            false
         }
     }
 
@@ -2273,6 +2473,8 @@ internal class Lwjgl3VulkanRuntime private constructor(
         spriteIndexBufferAllocation = indexBuffer.allocation
         spriteIndexMappedPtr = indexBuffer.mappedPtr
         spriteIndexMapped = indexBuffer.mapped
+
+        ensureSpriteQuadIndexCapacity(initialSpriteQuadBatchSprites)
     }
 
     private fun destroySpriteBuffers(){
@@ -2291,6 +2493,13 @@ internal class Lwjgl3VulkanRuntime private constructor(
         }
         spriteIndexBuffer = VK10.VK_NULL_HANDLE
         spriteIndexBufferAllocation = VK10.VK_NULL_HANDLE
+        spriteQuadIndexMapped = null
+        if(spriteQuadIndexBuffer != VK10.VK_NULL_HANDLE && spriteQuadIndexAllocation != VK10.VK_NULL_HANDLE){
+            Vma.vmaDestroyBuffer(allocator, spriteQuadIndexBuffer, spriteQuadIndexAllocation)
+        }
+        spriteQuadIndexBuffer = VK10.VK_NULL_HANDLE
+        spriteQuadIndexAllocation = VK10.VK_NULL_HANDLE
+        spriteQuadIndexCapacitySprites = 0
     }
 
     private fun createSpritePipelines(){
@@ -3377,6 +3586,8 @@ internal class Lwjgl3VulkanRuntime private constructor(
         private const val spritePushConstantSizeBytes = 24 * 4
         private const val spriteVertexBufferSize = 64 * 1024 * 1024
         private const val spriteIndexBufferSize = 32 * 1024 * 1024
+        private const val initialSpriteQuadBatchSprites = 2048
+        private const val maxSpriteQuadBatchSprites = 8191
         private const val spillVertexPageSizeBytes = 4 * 1024 * 1024
         private const val spillIndexPageSizeBytes = 2 * 1024 * 1024
         private const val maxSpriteTextures = 8192

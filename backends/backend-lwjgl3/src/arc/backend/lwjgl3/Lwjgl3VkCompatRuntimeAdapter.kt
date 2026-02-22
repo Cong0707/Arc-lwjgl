@@ -164,4 +164,40 @@ internal class Lwjgl3VkCompatRuntimeAdapter(
             blendColorA
         )
     }
+
+    override fun drawSpriteQuadBatch(
+        vertices: ByteBuffer,
+        vertexCount: Int,
+        textureId: Int,
+        projTrans: FloatArray,
+        blendEnabled: Boolean,
+        blendSrcColor: Int,
+        blendDstColor: Int,
+        blendSrcAlpha: Int,
+        blendDstAlpha: Int,
+        blendEqColor: Int,
+        blendEqAlpha: Int,
+        blendColorR: Float,
+        blendColorG: Float,
+        blendColorB: Float,
+        blendColorA: Float
+    ) {
+        runtime.drawSpriteQuadBatch(
+            vertices,
+            vertexCount,
+            textureId,
+            projTrans,
+            blendEnabled,
+            blendSrcColor,
+            blendDstColor,
+            blendSrcAlpha,
+            blendDstAlpha,
+            blendEqColor,
+            blendEqAlpha,
+            blendColorR,
+            blendColorG,
+            blendColorB,
+            blendColorA
+        )
+    }
 }

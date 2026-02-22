@@ -164,6 +164,8 @@ open class VulkanGL30CompatLayer(
     private var perfDirectNoMix20PathDrawsThisFrame = 0
     private var perfDirectNoMixU16NormPathDrawsThisFrame = 0
     private var perfRawNoMixU16PathDrawsThisFrame = 0
+    private var perfSpriteBatchFastPathDrawsThisFrame = 0
+    private var perfSpriteBatchFastPathSpritesThisFrame = 0
     private var perfDirectInterleavedPathDrawsThisFrame = 0
     private var perfDirectScreenCopyPosUvPathDrawsThisFrame = 0
     private var perfDecodedPathDrawsThisFrame = 0
@@ -244,6 +246,71 @@ open class VulkanGL30CompatLayer(
     override fun isSupported() = runtime != null
     override fun isNativeBackend() = true
     override fun getBackendName() = if (runtime != null) backendName else "$backendName (Unavailable)"
+    override fun supportsSpriteBatchFastPath() = runtime != null
+
+    override fun drawSpriteBatch(
+        texture: arc.graphics.Texture,
+        vertices: FloatBuffer,
+        vertexFloatCount: Int,
+        projTrans: FloatArray,
+        blendEnabled: Boolean,
+        blendSrcColor: Int,
+        blendDstColor: Int,
+        blendSrcAlpha: Int,
+        blendDstAlpha: Int,
+        blendEqColor: Int,
+        blendEqAlpha: Int,
+        blendColorR: Float,
+        blendColorG: Float,
+        blendColorB: Float,
+        blendColorA: Float
+    ): Boolean {
+        val vk = runtime ?: return false
+        if (vertexFloatCount <= 0 || (vertexFloatCount % SPRITE_FLOATS_PER_VERTEX) != 0) return false
+        if (projTrans.size < 16) return false
+        if (enabledCaps.contains(GL20.GL_STENCIL_TEST)) return false
+        val textureId = texture.getTextureObjectHandle()
+        if (textureId == 0 || framebufferTextures.contains(textureId)) return false
+        if (textures.get(textureId) == null) return false
+
+        val vertexCount = vertexFloatCount / SPRITE_FLOATS_PER_VERTEX
+        if ((vertexCount and 3) != 0) return false
+        val byteCount = vertexFloatCount * java.lang.Float.BYTES
+        ensureVertexScratchCapacity(byteCount)
+        val out = vertexScratch
+        out.clear()
+        out.limit(byteCount)
+        val copied = copyFromSource(vertices, byteCount, out, 0)
+        if (copied < byteCount) return false
+        out.position(0)
+        out.limit(byteCount)
+
+        vk.setCurrentFramebuffer(currentFramebuffer)
+        vk.drawSpriteQuadBatch(
+            out,
+            vertexCount,
+            textureId,
+            projTrans,
+            blendEnabled,
+            blendSrcColor,
+            blendDstColor,
+            blendSrcAlpha,
+            blendDstAlpha,
+            blendEqColor,
+            blendEqAlpha,
+            blendColorR,
+            blendColorG,
+            blendColorB,
+            blendColorA
+        )
+        if (perfTraceEnabled) {
+            perfSpriteBatchFastPathDrawsThisFrame++
+            perfSpriteBatchFastPathSpritesThisFrame += vertexCount / 4
+            perfDirectVertexBytesThisFrame += byteCount.toLong()
+            perfDirectIndicesThisFrame += (vertexCount / 4) * 6
+        }
+        return true
+    }
 
     override fun beginFrame() {
         clearStencilMaskBounds(Int.MIN_VALUE)
@@ -258,6 +325,7 @@ open class VulkanGL30CompatLayer(
             perfTextureUploadCopyBytesThisFrame = 0L; perfDirectPathDrawsThisFrame = 0
             perfDirectPacked24PathDrawsThisFrame = 0; perfDirectNoMix20PathDrawsThisFrame = 0
             perfDirectNoMixU16NormPathDrawsThisFrame = 0; perfRawNoMixU16PathDrawsThisFrame = 0
+            perfSpriteBatchFastPathDrawsThisFrame = 0; perfSpriteBatchFastPathSpritesThisFrame = 0
             perfDirectInterleavedPathDrawsThisFrame = 0
             perfDirectScreenCopyPosUvPathDrawsThisFrame = 0; perfDecodedPathDrawsThisFrame = 0
             perfDecodedInterleavedFastDrawsThisFrame = 0; perfDecodedSplitFastDrawsThisFrame = 0
@@ -330,12 +398,13 @@ open class VulkanGL30CompatLayer(
                 perfScratchGrowConvertBytesThisFrame
             )
             Log.info(
-                "VkCompat perf path frame @ direct(draws=@ packed24=@ nomix20=@ nomixU16=@ rawNoMixU16=@ interleaved=@ screenCopyPosUv=@ vertexBytes=@ indices=@ rejected=@[stencil=@ effect=@ screenCopy=@ flip=@ layout=@]) decoded(draws=@ fastInterleaved=@ splitFast=@ posUv[sameBuf=@ norm=@ f=@ s=@ h=@ other=@])",
+                "VkCompat perf path frame @ direct(draws=@ packed24=@ nomix20=@ nomixU16=@ rawNoMixU16=@ interleaved=@ screenCopyPosUv=@ vertexBytes=@ indices=@) batchFast(draws=@ sprites=@) rejected=@[stencil=@ effect=@ screenCopy=@ flip=@ layout=@] decoded(draws=@ fastInterleaved=@ splitFast=@ posUv[sameBuf=@ norm=@ f=@ s=@ h=@ other=@])",
                 traceFrameCounter, perfDirectPathDrawsThisFrame, perfDirectPacked24PathDrawsThisFrame,
                 perfDirectNoMix20PathDrawsThisFrame, perfDirectNoMixU16NormPathDrawsThisFrame,
                 perfRawNoMixU16PathDrawsThisFrame,
                 perfDirectInterleavedPathDrawsThisFrame, perfDirectScreenCopyPosUvPathDrawsThisFrame,
                 perfDirectVertexBytesThisFrame, perfDirectIndicesThisFrame,
+                perfSpriteBatchFastPathDrawsThisFrame, perfSpriteBatchFastPathSpritesThisFrame,
                 perfFastPathRejectedThisFrame, perfFastRejectStencilWriteThisFrame,
                 perfFastRejectEffectUnsupportedThisFrame, perfFastRejectScreenCopyLayoutThisFrame,
                 perfFastRejectFlipUnsupportedThisFrame, perfFastRejectLayoutMismatchThisFrame,
@@ -3206,6 +3275,7 @@ open class VulkanGL30CompatLayer(
         private const val MAX_VERTEX_UNIFORM_VECTORS = 1024
         private const val MAX_FRAGMENT_UNIFORM_VECTORS = 1024
         private const val MAX_VARYING_VECTORS = 16
+        private const val SPRITE_FLOATS_PER_VERTEX = 6
         private const val SPRITE_STRIDE = 24
         private const val NO_MIX_SPRITE_STRIDE = 20
         private const val GL_COLOR_ATTACHMENT0 = 0x8CE0

@@ -264,6 +264,7 @@ public class SpriteBatch extends Batch{
         }
 
         if(idx == 0) return;
+        if(tryFlushVulkanFastPath()) return;
 
         getShader().bind();
         setupMatrices();
@@ -291,6 +292,48 @@ public class SpriteBatch extends Batch{
         buffer.position(0);
 
         idx = 0;
+    }
+
+    protected boolean tryFlushVulkanFastPath(){
+        Vulkan vk = Core.vk;
+        if(vk == null || !vk.supportsSpriteBatchFastPath()) return false;
+        if(lastTexture == null || customShader != null) return false;
+        if(Core.gl.glIsEnabled(GL20.GL_STENCIL_TEST)) return false;
+        if(Core.gl.glIsEnabled(GL20.GL_DEPTH_TEST)) return false;
+
+        combinedMatrix.set(projectionMatrix).mul(transformMatrix);
+        float[] projTrans = Shader.copyTransform(combinedMatrix);
+        int vertexFloatCount = idx;
+
+        buffer.position(0);
+        buffer.limit(vertexFloatCount);
+        boolean submitted = vk.drawSpriteBatch(
+        lastTexture,
+        buffer,
+        vertexFloatCount,
+        projTrans,
+        blending != Blending.disabled,
+        blending.src,
+        blending.dst,
+        blending.srcAlpha,
+        blending.dstAlpha,
+        Gl.funcAdd,
+        Gl.funcAdd,
+        0f,
+        0f,
+        0f,
+        0f
+        );
+        if(submitted){
+            buffer.limit(buffer.capacity());
+            buffer.position(0);
+            idx = 0;
+            return true;
+        }
+
+        buffer.limit(buffer.capacity());
+        buffer.position(vertexFloatCount);
+        return false;
     }
 
     protected void flushRequests(){
