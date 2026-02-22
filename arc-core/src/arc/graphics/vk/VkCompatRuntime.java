@@ -110,4 +110,22 @@ public interface VkCompatRuntime{
     float blendColorB,
     float blendColorA
     );
+
+    void drawSpriteQuadBatch(
+    ByteBuffer vertices,
+    int vertexCount,
+    int textureId,
+    float[] projTrans,
+    boolean blendEnabled,
+    int blendSrcColor,
+    int blendDstColor,
+    int blendSrcAlpha,
+    int blendDstAlpha,
+    int blendEqColor,
+    int blendEqAlpha,
+    float blendColorR,
+    float blendColorG,
+    float blendColorB,
+    float blendColorA
+    );
 }
